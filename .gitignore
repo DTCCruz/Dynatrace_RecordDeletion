@@ -7,3 +7,5 @@ customer-ready
 *.csv
 prepare_customer_runbooks.sh
 tokentest.sh
+.vscode
+__pycache__
