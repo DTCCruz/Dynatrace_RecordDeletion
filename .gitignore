@@ -9,3 +9,4 @@ prepare_customer_runbooks.sh
 tokentest.sh
 .vscode
 __pycache__
+.DS_Store
