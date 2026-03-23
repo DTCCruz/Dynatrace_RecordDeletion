@@ -1,0 +1,59 @@
+# Dynatrace Grail Bucket Management
+
+This repository contains tools and documentation for managing Dynatrace Grail data and generating customer-ready runbooks.
+
+## Overview
+
+This project provides:
+- **Grail Data Export**: Python-based tool to query Dynatrace Grail and export data to CSV
+- **Runbook Preparation**: Shell script to customize runbooks for customer delivery
+- **Customer Documentation**: Multilingual runbooks in English and Brazilian Portuguese
+
+## Components
+
+### Core Files
+
+- **`grail_query_to_csv.py`** - Python script that queries Dynatrace Grail API and exports results to CSV format. Supports environment configuration via `.env` file and command-line arguments for customization.
+
+- **`RUNBOOK.md`** - English-language runbook with operational procedures and guidelines.
+
+- **`RUNBOOK_BR.md`** - Brazilian Portuguese version of the runbook.
+
+- **`env.txt`** - Template file for environment variable configuration.
+
+### Utility Scripts
+
+- **`prepare_customer_runbooks.sh`** - Bash script to customize runbooks by replacing placeholders (e.g., `{{CUSTOMER_NAME}}`) with actual customer information. Supports batch processing and modular scope selection.
+
+## Usage
+
+### Exporting Grail Data
+
+```bash
+# Ensure dependencies are installed
+python3 -m pip install requests
+
+# Run the export script
+python3 grail_query_to_csv.py [options]
+```
+
+### Preparing Customer Runbooks
+
+```bash
+# Replace customer name in runbooks
+./prepare_customer_runbooks.sh "Customer Name"
+
+# Generate customer-ready copies to a specific directory
+./prepare_customer_runbooks.sh --customer "Customer Name" --output-dir dist-customer
+
+# Include public runbook variants
+./prepare_customer_runbooks.sh --customer "Customer Name" --include-public
+```
+
+## Configuration
+
+Set up your environment variables by creating a `.env` file based on `env.txt`. Required variables depend on the Grail query being executed.
+
+## License
+
+Internal Dynatrace documentation and tooling.
