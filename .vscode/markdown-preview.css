@@ -1,0 +1,26 @@
+:root {
+  --runbook-code-bg: #f3f4f6;
+  --runbook-code-fg: #111827;
+  --runbook-code-border: #d1d5db;
+  --runbook-inline-bg: #eceff3;
+}
+
+pre {
+  background: var(--runbook-code-bg) !important;
+  border: 1px solid var(--runbook-code-border);
+  border-radius: 10px;
+  box-shadow: none !important;
+}
+
+pre code {
+  color: var(--runbook-code-fg) !important;
+  background: transparent !important;
+}
+
+:not(pre) > code {
+  background: var(--runbook-inline-bg) !important;
+  color: #0f172a !important;
+  border: 1px solid var(--runbook-code-border);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}

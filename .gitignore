@@ -1,0 +1,9 @@
+.venv
+.env
+Archive.zip
+Public
+Strategy
+customer-ready
+*.csv
+prepare_customer_runbooks.sh
+tokentest.sh
