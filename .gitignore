@@ -5,7 +5,8 @@ Public
 Strategy
 customer-ready
 *.csv
-prepare_customer_runbooks.sh
+*.xlsx
+*.OLD
 tokentest.sh
 .vscode
 __pycache__

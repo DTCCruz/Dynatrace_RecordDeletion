@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
 
+"""
+===============================================================================
+DISCLAIMER - LEGAL NOTICE
+===============================================================================
+This script is provided AS IS as a best-effort starting point for Grail data
+export and deletion workflows. It is not a Dynatrace product and includes no
+warranties, official support, versioning, or maintenance commitments.
+
+The customer or user is responsible for installation, customization,
+implementation, validation, security review, and ongoing operation.
+===============================================================================
+"""
+
 import argparse
 import csv
 import json
@@ -350,31 +363,329 @@ def calculate_24h_chunks(tf_start: str, tf_end: str) -> list[tuple[str, str]]:
     return chunks
 
 
+def format_duration(seconds: float) -> str:
+    if seconds < 0:
+        return "unknown"
+
+    total_seconds = int(round(seconds))
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def extract_first_numeric_value(record: dict) -> int:
+    for value in record.values():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            try:
+                if value.strip() and value.strip().lstrip("-").isdigit():
+                    return int(value.strip())
+            except Exception:
+                continue
+    return -1
+
+
+def query_chunk_record_count(base_url: str, token: str, delete_query: str, tf_start: str, tf_end: str) -> int:
+    count_query = f"{delete_query.strip()} | summarize __count=count()"
+    try:
+        result, _ = run_query(base_url, token, count_query, tf_start, tf_end)
+        records = result.get("result", {}).get("records") or []
+        if not records:
+            return 0
+        first = records[0]
+        if isinstance(first, dict):
+            return max(0, extract_first_numeric_value(first))
+        return -1
+    except Exception as exc:
+        print(f"Chunk count query failed for {tf_start} to {tf_end}: {exc}")
+        return -1
+
+
+def query_chunk_size_estimate(
+    base_url: str,
+    token: str,
+    delete_query: str,
+    tf_start: str,
+    tf_end: str,
+    sample_limit: int = 1000,
+) -> tuple[int, int]:
+    sample_query = f"{delete_query.strip()} | limit {sample_limit}"
+    try:
+        result, _ = run_query(base_url, token, sample_query, tf_start, tf_end)
+        records = result.get("result", {}).get("records") or []
+        if not records:
+            return 0, 0
+
+        sample_bytes = estimate_records_json_size_bytes(records)
+        return len(records), sample_bytes
+    except Exception as exc:
+        print(f"Chunk size sample query failed for {tf_start} to {tf_end}: {exc}")
+        return -1, -1
+
+
+def estimate_delete_seconds(
+    records: int,
+    bytes_est: int,
+    observed_chunks: list[dict],
+) -> float:
+    completed = [c for c in observed_chunks if c.get("deleted")]
+    if completed:
+        total_obs_delete = sum(c.get("delete_seconds", 0.0) for c in completed)
+        total_obs_records = sum(max(0, c.get("records", -1)) for c in completed)
+        total_obs_bytes = sum(max(0, c.get("bytes_est", -1)) for c in completed)
+
+        estimates = []
+        if total_obs_delete > 0 and records >= 0 and total_obs_records > 0:
+            rec_rate = total_obs_records / total_obs_delete
+            if rec_rate > 0:
+                estimates.append(records / rec_rate)
+
+        if total_obs_delete > 0 and bytes_est >= 0 and total_obs_bytes > 0:
+            byte_rate = total_obs_bytes / total_obs_delete
+            if byte_rate > 0:
+                estimates.append(bytes_est / byte_rate)
+
+        if estimates:
+            return max(5.0, sum(estimates) / len(estimates))
+
+    # Bootstrap heuristic before observed performance is available.
+    baseline = 8.0
+    if records >= 0:
+        baseline += records / 30000.0
+    if bytes_est >= 0:
+        baseline += bytes_est / float(200 * 1024 * 1024)
+    return max(5.0, baseline)
+
+
+def estimate_combined_seconds(
+    est_delete_seconds: float,
+    observed_chunks: list[dict],
+    default_overhead_seconds: float,
+) -> float:
+    completed = [c for c in observed_chunks if c.get("deleted")]
+    if completed:
+        overhead_samples = [
+            max(0.0, c.get("combined_seconds", 0.0) - c.get("delete_seconds", 0.0))
+            for c in completed
+        ]
+        if overhead_samples:
+            avg_overhead = sum(overhead_samples) / len(overhead_samples)
+            return max(est_delete_seconds, est_delete_seconds + avg_overhead)
+
+    return est_delete_seconds + default_overhead_seconds
+
+
+def print_chunk_estimate_table(chunk_metrics: list[dict]):
+    print("\nChunk workload and time estimate (24h windows):")
+    print("Idx | Window Start -> End      | Records    | Est. Bytes | Est. Delete | Est. Combined")
+    print("----+--------------------------+------------+------------+-------------+--------------")
+    for metric in chunk_metrics:
+        records = metric.get("records", -1)
+        bytes_est = metric.get("bytes_est", -1)
+        records_str = f"{records:,}" if records >= 0 else "unknown"
+        bytes_str = format_bytes(bytes_est) if bytes_est >= 0 else "unknown"
+        est_delete_str = format_duration(metric.get("est_delete_seconds", -1.0))
+        est_combined_str = format_duration(metric.get("est_combined_seconds", -1.0))
+        window = f"{metric['start'][:10]} -> {metric['end'][:10]}"
+        print(
+            f"{metric['index']:>3} | {window:<24} | {records_str:>10} | {bytes_str:>10} | "
+            f"{est_delete_str:>11} | {est_combined_str:>12}"
+        )
+
+
+def print_chunk_estimate_totals(chunk_metrics: list[dict]):
+    est_total_delete = sum(m.get("est_delete_seconds", 0.0) for m in chunk_metrics)
+    est_total_combined = sum(m.get("est_combined_seconds", 0.0) for m in chunk_metrics)
+    print(
+        "Estimated totals: "
+        f"delete={format_duration(est_total_delete)}, "
+        f"combined={format_duration(est_total_combined)}"
+    )
+
+
+def build_chunk_estimates(
+    base_url: str,
+    token: str,
+    delete_query: str,
+    chunks: list[tuple[str, str]],
+    validation_interval_seconds: int = 2,
+) -> list[dict]:
+    chunk_metrics: list[dict] = []
+    observed_chunks: list[dict] = []
+
+    print("Analyzing chunk workload (records/bytes) for estimation...")
+    for i, (chunk_start, chunk_end) in enumerate(chunks, 1):
+        chunk_duration_hours = (parse_iso8601(chunk_end) - parse_iso8601(chunk_start)).total_seconds() / 3600
+        print(f"  Chunk {i}/{len(chunks)} ({chunk_duration_hours:.1f}h): {chunk_start[:10]} to {chunk_end[:10]}")
+
+        records_count = query_chunk_record_count(base_url, token, delete_query, chunk_start, chunk_end)
+        sample_count, sample_bytes = query_chunk_size_estimate(
+            base_url,
+            token,
+            delete_query,
+            chunk_start,
+            chunk_end,
+            sample_limit=1000,
+        )
+
+        bytes_est = -1
+        if records_count == 0:
+            bytes_est = 0
+        elif records_count > 0 and sample_count > 0 and sample_bytes >= 0:
+            avg_record_size = sample_bytes / sample_count
+            bytes_est = int(records_count * avg_record_size)
+
+        est_delete_seconds = estimate_delete_seconds(records_count, bytes_est, observed_chunks)
+        est_combined_seconds = estimate_combined_seconds(
+            est_delete_seconds,
+            observed_chunks,
+            default_overhead_seconds=max(2.0, float(validation_interval_seconds)),
+        )
+
+        chunk_metrics.append(
+            {
+                "index": i,
+                "start": chunk_start,
+                "end": chunk_end,
+                "records": records_count,
+                "bytes_est": bytes_est,
+                "sample_count": sample_count,
+                "sample_bytes": sample_bytes,
+                "est_delete_seconds": est_delete_seconds,
+                "est_combined_seconds": est_combined_seconds,
+                "deleted": False,
+                "delete_seconds": -1.0,
+                "combined_seconds": -1.0,
+            }
+        )
+
+    return chunk_metrics
+
+
+def print_final_chunk_report(chunk_metrics: list[dict]):
+    print("\nFinal chunk execution report:")
+    print("Idx | Status  | Est. Delete | Real Delete | Est. Combined | Real Combined")
+    print("----+---------+-------------+-------------+---------------+--------------")
+    for metric in chunk_metrics:
+        status = "OK" if metric.get("deleted") else "FAILED"
+        est_delete = format_duration(metric.get("est_delete_seconds", -1.0))
+        real_delete = format_duration(metric.get("delete_seconds", -1.0))
+        est_combined = format_duration(metric.get("est_combined_seconds", -1.0))
+        real_combined = format_duration(metric.get("combined_seconds", -1.0))
+        print(
+            f"{metric['index']:>3} | {status:<7} | {est_delete:>11} | {real_delete:>11} | "
+            f"{est_combined:>13} | {real_combined:>12}"
+        )
+
+
 def delete_records_in_chunks(
-    base_url: str, token: str, delete_query: str, tf_start: str, tf_end: str
+    base_url: str,
+    token: str,
+    delete_query: str,
+    tf_start: str,
+    tf_end: str,
+    validation_retries: int = 1,
+    validation_interval_seconds: int = 2,
+    precomputed_chunks: list[tuple[str, str]] | None = None,
+    precomputed_metrics: list[dict] | None = None,
 ) -> bool:
     """
     Delete records in 24-hour chunks to work around Dynatrace deletion API limits.
     Works backwards from tf_end to tf_start.
     """
-    try:
-        chunks = calculate_24h_chunks(tf_start, tf_end)
-    except ValueError as e:
-        print(f"Chunk calculation failed: {e}")
-        return False
+    if precomputed_chunks is not None:
+        chunks = precomputed_chunks
+    else:
+        try:
+            chunks = calculate_24h_chunks(tf_start, tf_end)
+        except ValueError as e:
+            print(f"Chunk calculation failed: {e}")
+            return False
 
     print(f"\nWill delete in {len(chunks)} chunks of 24 hours each:")
-    for i, (chunk_start, chunk_end) in enumerate(chunks, 1):
-        chunk_duration_hours = (parse_iso8601(chunk_end) - parse_iso8601(chunk_start)).total_seconds() / 3600
-        print(f"  Chunk {i}/{len(chunks)} ({chunk_duration_hours:.1f}h): {chunk_start[:10]} to {chunk_end[:10]}")
+    if precomputed_metrics is not None and len(precomputed_metrics) == len(chunks):
+        chunk_metrics = precomputed_metrics
+    else:
+        chunk_metrics = build_chunk_estimates(
+            base_url,
+            token,
+            delete_query,
+            chunks,
+            validation_interval_seconds=validation_interval_seconds,
+        )
+        print_chunk_estimate_table(chunk_metrics)
+        print_chunk_estimate_totals(chunk_metrics)
+
+    observed_chunks: list[dict] = []
 
     failed_chunks = []
     for i, (chunk_start, chunk_end) in enumerate(chunks, 1):
+        metric = chunk_metrics[i - 1]
         try:
-            print(f"\n[{i}/{len(chunks)}] Deleting chunk {i}...")
+            remaining_delete_est = sum(
+                m["est_delete_seconds"]
+                for m in chunk_metrics[i - 1:]
+            )
+            remaining_combined_est = sum(
+                m["est_combined_seconds"]
+                for m in chunk_metrics[i - 1:]
+            )
+            print(
+                f"\n[{i}/{len(chunks)}] Deleting chunk {i}... "
+                f"(remaining est delete={format_duration(remaining_delete_est)}, "
+                f"combined={format_duration(remaining_combined_est)})"
+            )
+
+            delete_started = time.monotonic()
             deleted = delete_records_in_grail(base_url, token, delete_query, chunk_start, chunk_end)
+            delete_elapsed = time.monotonic() - delete_started
+
+            post_check_started = time.monotonic()
             if deleted:
-                print(f"[{i}/{len(chunks)}] Chunk {i} deleted successfully.")
+                # Quick per-chunk post-check to approximate end-to-end completion time.
+                validate_records_deleted(
+                    base_url,
+                    token,
+                    delete_query,
+                    chunk_start,
+                    chunk_end,
+                    retries=max(1, validation_retries),
+                    interval_seconds=max(1, validation_interval_seconds),
+                )
+            post_check_elapsed = time.monotonic() - post_check_started
+            combined_elapsed = delete_elapsed + post_check_elapsed
+
+            metric["delete_seconds"] = delete_elapsed
+            metric["combined_seconds"] = combined_elapsed
+            metric["deleted"] = bool(deleted)
+
+            if deleted:
+                print(
+                    f"[{i}/{len(chunks)}] Chunk {i} deleted successfully. "
+                    f"Observed delete={format_duration(delete_elapsed)}, "
+                    f"combined={format_duration(combined_elapsed)}"
+                )
+
+                observed_chunks.append(metric)
+                for future_metric in chunk_metrics[i:]:
+                    future_est_delete = estimate_delete_seconds(
+                        future_metric.get("records", -1),
+                        future_metric.get("bytes_est", -1),
+                        observed_chunks,
+                    )
+                    future_metric["est_delete_seconds"] = future_est_delete
+                    future_metric["est_combined_seconds"] = estimate_combined_seconds(
+                        future_est_delete,
+                        observed_chunks,
+                        default_overhead_seconds=max(2.0, float(validation_interval_seconds)),
+                    )
             else:
                 print(f"[{i}/{len(chunks)}] Chunk {i} delete did not complete.")
                 failed_chunks.append(i)
@@ -385,6 +696,27 @@ def delete_records_in_chunks(
         except Exception as e:
             print(f"[{i}/{len(chunks)}] Chunk {i} delete failed: {e}")
             failed_chunks.append(i)
+
+    successful = [m for m in chunk_metrics if m.get("deleted")]
+    if successful:
+        obs_delete = sum(m.get("delete_seconds", 0.0) for m in successful)
+        obs_combined = sum(m.get("combined_seconds", 0.0) for m in successful)
+        obs_records = sum(max(0, m.get("records", -1)) for m in successful)
+        obs_bytes = sum(max(0, m.get("bytes_est", -1)) for m in successful)
+        rec_rate = (obs_records / obs_delete) if obs_delete > 0 and obs_records > 0 else 0.0
+        byte_rate = (obs_bytes / obs_delete) if obs_delete > 0 and obs_bytes > 0 else 0.0
+        print("\nObserved performance summary:")
+        print(
+            f"  Successful chunks: {len(successful)}/{len(chunk_metrics)} | "
+            f"Delete total: {format_duration(obs_delete)} | "
+            f"Combined total: {format_duration(obs_combined)}"
+        )
+        if rec_rate > 0:
+            print(f"  Throughput: {rec_rate:,.2f} records/s")
+        if byte_rate > 0:
+            print(f"  Throughput: {format_bytes(int(byte_rate))}/s")
+
+    print_final_chunk_report(chunk_metrics)
 
     if failed_chunks:
         print(f"\n⚠️  {len(failed_chunks)} chunk(s) failed: {failed_chunks}")
@@ -400,6 +732,7 @@ def confirm_hard_delete_chunked(delete_query: str, tf_start: str, tf_end: str, o
     print("Hard delete will permanently remove matching records from Grail.")
     print(f"Delete timeframe: {tf_start} -> {tf_end}")
     print(f"Delete will proceed in {chunk_count} chunks (24 hours each) due to API limits.")
+    print("Review the estimate above before deciding.")
     print(f"Delete query: {delete_query}")
     try:
         answer = input("Proceed with hard delete in Grail? Type 'yes' to continue: ").strip().lower()
@@ -489,7 +822,9 @@ def save_json_records_to_csv(records, out_file):
 def main():
     load_env(".env")
 
-    parser = argparse.ArgumentParser(description="Minimal Grail logs query -> CSV (7 months default)")
+    parser = argparse.ArgumentParser(
+        description="Grail logs query -> CSV with chunk deletion time estimation"
+    )
     parser.add_argument("--environment", required=False, help="Tenant URL or ID (fallback: DT_ENVIRONMENT)")
     parser.add_argument("--token", required=False, help="Bearer token (fallback: DT_TOKEN)")
     parser.add_argument("--query", required=False, help="Grail query expression (fallback: DT_QUERY)")
@@ -548,16 +883,16 @@ def main():
     dt_from_env = os.getenv("DT_FROM")
 
     if args.to_ts:
-        to_ts = datetime.fromisoformat(args.to_ts.replace("Z", "+00:00"))
+        to_ts = parse_iso8601(args.to_ts)
     elif dt_to_env:
-        to_ts = datetime.fromisoformat(dt_to_env.replace("Z", "+00:00"))
+        to_ts = parse_iso8601(dt_to_env)
     else:
         to_ts = datetime.now(timezone.utc)
 
     if args.from_ts:
-        from_ts = datetime.fromisoformat(args.from_ts.replace("Z", "+00:00"))
+        from_ts = parse_iso8601(args.from_ts)
     elif dt_from_env:
-        from_ts = datetime.fromisoformat(dt_from_env.replace("Z", "+00:00"))
+        from_ts = parse_iso8601(dt_from_env)
     else:
         from_ts = to_ts - timedelta(days=int(365 * 7 / 12))  # ~7 months
 
@@ -572,16 +907,16 @@ def main():
     dt_delete_to_env = os.getenv("DT_DELETE_TO")
 
     if args.delete_from_ts:
-        delete_from_ts = datetime.fromisoformat(args.delete_from_ts.replace("Z", "+00:00"))
+        delete_from_ts = parse_iso8601(args.delete_from_ts)
     elif dt_delete_from_env:
-        delete_from_ts = datetime.fromisoformat(dt_delete_from_env.replace("Z", "+00:00"))
+        delete_from_ts = parse_iso8601(dt_delete_from_env)
     else:
         delete_from_ts = from_ts  # Default to export window
 
     if args.delete_to_ts:
-        delete_to_ts = datetime.fromisoformat(args.delete_to_ts.replace("Z", "+00:00"))
+        delete_to_ts = parse_iso8601(args.delete_to_ts)
     elif dt_delete_to_env:
-        delete_to_ts = datetime.fromisoformat(dt_delete_to_env.replace("Z", "+00:00"))
+        delete_to_ts = parse_iso8601(dt_delete_to_env)
     else:
         delete_to_ts = to_ts  # Default to export window
 
@@ -655,6 +990,16 @@ def main():
                         print(f"Local file retained: {out_path}")
                         return
 
+                chunk_metrics = build_chunk_estimates(
+                    base_url,
+                    token,
+                    delete_query,
+                    chunks,
+                    validation_interval_seconds=max(1, min(5, delete_validate_interval_seconds)),
+                )
+                print_chunk_estimate_table(chunk_metrics)
+                print_chunk_estimate_totals(chunk_metrics)
+
                 confirmed = confirm_hard_delete_chunked(delete_query, delete_tf_start, delete_tf_end, out_path, chunk_count)
                 if not confirmed:
                     print("Remote delete canceled by user.")
@@ -665,7 +1010,17 @@ def main():
                         print("⚠️  No matching records found in Grail for the delete window — nothing to delete.")
                         print("   Data may have already been deleted in a previous run.")
                     else:
-                        deleted = delete_records_in_chunks(base_url, token, delete_query, delete_tf_start, delete_tf_end)
+                        deleted = delete_records_in_chunks(
+                            base_url,
+                            token,
+                            delete_query,
+                            delete_tf_start,
+                            delete_tf_end,
+                            validation_retries=max(1, min(3, delete_validate_retries)),
+                            validation_interval_seconds=max(1, min(5, delete_validate_interval_seconds)),
+                            precomputed_chunks=chunks,
+                            precomputed_metrics=chunk_metrics,
+                        )
                         if deleted:
                             print("Remote Grail records deleted successfully.")
                             validate_records_deleted(
