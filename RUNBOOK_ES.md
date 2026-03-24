@@ -459,6 +459,9 @@ DT_DELETE_VALIDATE_INTERVAL_SECONDS=30
 
 ## 11. Referencia de API
 
+Referencia Swagger:
+Use su propio ID de tenant para validación y verificación: `https://YOUR_TENANT_ID.apps.dynatrace.com/platform/swagger-ui/index.html#`
+
 | Operación | Endpoint | Método |
 | --- | --- | --- |
 | Ejecutar consulta | `/platform/storage/query/v2/query:execute` | POST |
