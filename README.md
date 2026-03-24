@@ -7,7 +7,7 @@ This repository contains tools and documentation for managing Dynatrace Grail da
 This project provides:
 - **Grail Data Export**: Python-based tool to query Dynatrace Grail and export data to CSV
 - **Runbook Preparation**: Shell script to customize runbooks for customer delivery
-- **Customer Documentation**: Multilingual runbooks in English and Brazilian Portuguese
+- **Customer Documentation**: Multilingual runbooks available in English, Brazilian Portuguese, and Spanish
 
 ## Components
 
@@ -18,6 +18,8 @@ This project provides:
 - **`RUNBOOK.md`** - English-language runbook with operational procedures and guidelines.
 
 - **`RUNBOOK_BR.md`** - Brazilian Portuguese version of the runbook.
+
+- **`RUNBOOK_ES.md`** - Spanish version of the runbook.
 
 - **`env.txt`** - Template file for environment variable configuration.
 
