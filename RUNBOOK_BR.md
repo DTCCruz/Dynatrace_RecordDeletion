@@ -16,17 +16,17 @@ Use este guia como manual operacional: o que configurar, o que executar, o que e
 
 ## Índice
 
-1. O que a ferramenta faz
-2. Antes de começar
-3. Início rápido (primeira execução recomendada)
-4. Configuração (.env)
-5. Procedimentos operacionais passo a passo
-6. Regras de segurança (leia antes de excluir)
-7. Arquivos de saída e validação
-8. Limpeza de longo período (múltiplos dias ou múltiplos meses)
-9. Mensagens de console e significado
-10. Solução de problemas
-11. Referência de API
+1. [O que a ferramenta faz](#1-o-que-a-ferramenta-faz)
+2. [Antes de começar](#2-antes-de-começar)
+3. [Início rápido (primeira execução recomendada)](#3-início-rápido-primeira-execução-recomendada)
+4. [Configuração (.env)](#4-configuração-env)
+5. [Procedimentos operacionais passo a passo](#5-procedimentos-operacionais-passo-a-passo)
+6. [Regras de segurança (leia antes de excluir)](#6-regras-de-segurança-leia-antes-de-excluir)
+7. [Arquivos de saída e validação](#7-arquivos-de-saída-e-validação)
+8. [Limpeza de longo período (múltiplos dias ou múltiplos meses)](#8-limpeza-de-longo-período-múltiplos-dias-ou-múltiplos-meses)
+9. [Mensagens de console e significado](#9-mensagens-de-console-e-significado)
+10. [Solução de problemas](#10-solução-de-problemas)
+11. [Referência de API](#11-referência-de-api)
 
 ---
 
