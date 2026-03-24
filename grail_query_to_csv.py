@@ -319,14 +319,30 @@ def parse_iso8601(ts_str: str) -> datetime:
     """Parse ISO8601 timestamp string to datetime object."""
     # Handle formats like 2026-03-19T03:00:00.999999999Z or 2026-03-19T00:00:00.000000000Z
     ts_str = ts_str.strip()
+    
+    # Handle nanoseconds first (before timezone replacement)
+    if "." in ts_str:
+        dot_idx = ts_str.index(".")
+        # Find timezone offset position
+        tz_start = len(ts_str)
+        for i in range(dot_idx + 1, len(ts_str)):
+            if ts_str[i] in ('+', '-', 'Z'):
+                tz_start = i
+                break
+        
+        # Extract fractional seconds and timezone parts
+        frac_part = ts_str[dot_idx + 1:tz_start]
+        tz_part = ts_str[tz_start:]
+        
+        # Truncate fractional seconds to microseconds (6 digits) if needed
+        if len(frac_part) > 6:
+            frac_part = frac_part[:6]
+            ts_str = ts_str[:dot_idx + 1] + frac_part + tz_part
+    
+    # Now handle Z -> +00:00 conversion
     if ts_str.endswith("Z"):
         ts_str = ts_str[:-1] + "+00:00"
-    # Remove nanoseconds if present (keep only microseconds)
-    if "." in ts_str:
-        parts = ts_str.split(".")
-        if len(parts[1]) > 6:
-            # Truncate to microseconds
-            ts_str = f"{parts[0]}.{parts[1][:6]}+00:00"
+    
     return datetime.fromisoformat(ts_str)
 
 
