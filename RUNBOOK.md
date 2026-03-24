@@ -72,9 +72,15 @@ Always run with `.venv/bin/python` so dependencies are consistent.
 
 Follow this exact sequence for a safe first execution.
 
-### Step 1: Configure `.env`
+### Step 1: Create `.env` from `env.txt`
 
-Set `DT_ENVIRONMENT`, `DT_TOKEN`, `DT_QUERY`, `DT_FROM`, `DT_TO`, and `DT_OUT`.
+Use `env.txt` as the starter template and create a `.env` file in the same folder.
+
+```text
+cp env.txt .env
+```
+
+Then edit `.env` and set `DT_ENVIRONMENT`, `DT_TOKEN`, `DT_QUERY`, `DT_FROM`, `DT_TO`, and `DT_OUT`.
 
 ### Step 2: Run export only
 
@@ -107,7 +113,7 @@ Use either:
 
 ## 4. Configuration (.env)
 
-All settings are read from `.env`. Shell environment variables override `.env` values.
+Use `env.txt` as the starter template to create `.env`. All settings are read from `.env`. Shell environment variables override `.env` values.
 
 ### 4.1 Full example
 
