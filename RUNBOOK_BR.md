@@ -6,11 +6,11 @@ Use este guia como manual operacional: o que configurar, o que executar, o que e
 
 > **AVISO IMPORTANTE - COMUNICADO LEGAL**
 >
-> - Este script foi desenvolvido exclusivamente para auxiliar **{{CUSTOMER_NAME}}** nos fluxos de exportação e exclusão de dados no Grail.
+> - Este script foi desenvolvido exclusivamente para auxiliar **CIELO** nos fluxos de exportação e exclusão de dados no Grail.
 > - Este script é fornecido **AS IS**, como um **PONTO DE PARTIDA EM MELHOR ESFORÇO**, e **NÃO É UM PRODUTO DYNATRACE**.
 > - A Dynatrace não oferece **NENHUMA GARANTIA**, **NENHUM SUPORTE OFICIAL**, nem **COMPROMISSO DE VERSIONAMENTO OU MANUTENÇÃO** para este script.
 > - A exclusão de registros é uma capacidade existente das APIs da Dynatrace. Este script apenas demonstra uma possível abordagem para controle de dados no Grail, gerenciado pelo próprio cliente.
-> - **{{CUSTOMER_NAME}}** reconhece responsabilidade por instalação, customização, implementação, validação, revisão de segurança e operação contínua, sem **COMPROMISSO DE SUPORTE FUTURO** da Dynatrace.
+> - **CIELO** reconhece responsabilidade por instalação, customização, implementação, validação, revisão de segurança e operação contínua, sem **COMPROMISSO DE SUPORTE FUTURO** da Dynatrace.
 
 ---
 

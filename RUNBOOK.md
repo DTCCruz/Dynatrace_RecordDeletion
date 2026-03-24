@@ -6,11 +6,11 @@ Use this guide as an operator manual: what to configure, what to run, what to ex
 
 > **IMPORTANT DISCLAIMER - LEGAL NOTICE**
 >
-> - This script was developed solely to assist **{{CUSTOMER_NAME}}** with Grail data export and deletion workflows.
+> - This script was developed solely to assist **CIELO** with Grail data export and deletion workflows.
 > - This script is provided **AS IS**, as a **BEST-EFFORT STARTING POINT**, and is **NOT A DYNATRACE PRODUCT**.
 > - Dynatrace provides **NO WARRANTIES**, **NO OFFICIAL SUPPORT**, and **NO VERSIONING OR MAINTENANCE COMMITMENTS** for this script.
 > - Record deletion is an existing capability of Dynatrace APIs. This script only demonstrates one possible approach for customer-managed data control in Grail.
-> - **{{CUSTOMER_NAME}}** acknowledges responsibility for installation, customization, implementation, validation, security review, and ongoing operation, with **NO FUTURE SUPPORT COMMITMENT** from Dynatrace.
+> - **CIELO** acknowledges responsibility for installation, customization, implementation, validation, security review, and ongoing operation, with **NO FUTURE SUPPORT COMMITMENT** from Dynatrace.
 
 ---
 

@@ -17,8 +17,8 @@ usage() {
   cat <<'EOF'
 Usage:
   ./prepare_customer_runbooks.sh "Customer Name"
-  ./prepare_customer_runbooks.sh --customer Customer Name [--include-public]
-  ./prepare_customer_runbooks.sh --customer Customer Name --output-dir DIR [--include-public]
+  ./prepare_customer_runbooks.sh --customer Customer Name
+  ./prepare_customer_runbooks.sh --customer Customer Name --output-dir DIR
 
 Description:
   Replaces {{CUSTOMER_NAME}} and removes legacy internal template-note lines.
@@ -28,14 +28,17 @@ Modes:
   --output-dir Creates customer-ready copies in the specified directory
 
 Scope:
-  default          Processes RUNBOOK.md and RUNBOOK_BR.md
-  --include-public Also processes Public/RUNBOOK.md and Public/RUNBOOK_BR.md
-                   (single-dash alias -include-public is also accepted)
+  Processes RUNBOOK.md, RUNBOOK_BR.md, and RUNBOOK_ES.md
+
+Customer package files:
+  --output-dir Also copies grail_query_to_csv.py and env.txt to DIR/
+
+Compatibility note:
+  --include-public / -include-public are accepted but ignored.
 
 Examples:
   ./prepare_customer_runbooks.sh Cielo
   ./prepare_customer_runbooks.sh --customer Banco do Brasil
-  ./prepare_customer_runbooks.sh --customer Banco do Brasil --include-public
   ./prepare_customer_runbooks.sh --customer Banco do Brasil --output-dir dist-bdb
 EOF
 }
@@ -56,6 +59,20 @@ replace_customer_name() {
   ' "$file_path"
 
   perl -0pi -e 's/^[ \t]*> - \*\*Template note for Dynatrace SEs:\*\*.*\n//mg; s/^[ \t]*> - \*\*Nota de template para SEs Dynatrace:\*\*.*\n//mg;' "$file_path"
+}
+
+copy_if_exists() {
+  local src="$1"
+  local dst="$2"
+
+  if [[ ! -f "$src" ]]; then
+    echo "Skipping missing file: $(basename "$src")" >&2
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$dst")"
+  cp "$src" "$dst"
+  return 0
 }
 
 if [[ $# -eq 0 ]]; then
@@ -125,6 +142,10 @@ if [[ -z "$customer_name" ]]; then
   exit 1
 fi
 
+if [[ "$include_public" == "true" ]]; then
+  echo "Warning: --include-public is deprecated and ignored." >&2
+fi
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "$output_dir" = /* ]]; then
   output_abs="$output_dir"
@@ -135,14 +156,8 @@ fi
 files=(
   "RUNBOOK.md"
   "RUNBOOK_BR.md"
+  "RUNBOOK_ES.md"
 )
-
-if [[ "$include_public" == "true" ]]; then
-  files+=(
-    "Public/RUNBOOK.md"
-    "Public/RUNBOOK_BR.md"
-  )
-fi
 
 if [[ -z "$output_dir" ]]; then
   for rel in "${files[@]}"; do
@@ -177,6 +192,11 @@ for rel in "${files[@]}"; do
 
   replace_customer_name "$dst" "$customer_name"
 done
+
+copy_if_exists "${script_dir}/grail_query_to_csv.py" "${output_abs}/grail_query_to_csv.py" && \
+  echo " - ${output_dir}/grail_query_to_csv.py"
+copy_if_exists "${script_dir}/env.txt" "${output_abs}/env.txt" && \
+  echo " - ${output_dir}/env.txt"
 
 echo "Generated customer-ready runbooks in: ${output_abs}"
 for rel in "${files[@]}"; do
