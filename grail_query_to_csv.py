@@ -20,6 +20,7 @@ import os
 import time
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
+from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
@@ -609,8 +610,8 @@ def delete_records_in_chunks(
     tf_end: str,
     validation_retries: int = 1,
     validation_interval_seconds: int = 2,
-    precomputed_chunks: list[tuple[str, str]] | None = None,
-    precomputed_metrics: list[dict] | None = None,
+    precomputed_chunks: Optional[list[tuple[str, str]]] = None,
+    precomputed_metrics: Optional[list[dict]] = None,
 ) -> bool:
     """
     Delete records in 24-hour chunks to work around Dynatrace deletion API limits.
