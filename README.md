@@ -9,7 +9,7 @@ This project provides:
 - **Runbook Preparation**: Shell script to customize runbooks for customer delivery
 - **Customer Documentation**: Multilingual runbooks available in English, Brazilian Portuguese, and Spanish
 
-Dynatrace record deletion in Grail is a native platform capability available through the Dynatrace Record Deletion API. The scripts in this repository do not create a new deletion feature; they provide an operational wrapper around the existing Dynatrace API to help export, validate, and optionally delete matching records in a controlled workflow. For the native platform documentation, see [Record deletion in Grail via API](https://docs.dynatrace.com/docs/platform/grail/organize-data/record-deletion-in-grail). For API endpoint reference in Swagger UI, use your own tenant ID for validation and verification: `https://YOUR_TENANT_ID.apps.dynatrace.com/platform/swagger-ui/index.html#`.
+Dynatrace record deletion in Grail is a native platform capability available through the Dynatrace Record Deletion API. The scripts in this repository do not create a new deletion feature; they provide an operational wrapper around the existing Dynatrace API to help export, validate, and optionally delete matching records in a controlled workflow. For the native platform documentation, see [Record deletion in Grail via API](https://docs.dynatrace.com/docs/platform/grail/organize-data/record-deletion-in-grail). For API endpoint reference in Swagger UI, use your own tenant ID for validation and verification: `https://YOUR_TENANT_ID.apps.dynatrace.com/platform/swagger-ui/index.html?urls.primaryName=Grail+-+Storage+Record+Deletion`.
 
 ## Components
 

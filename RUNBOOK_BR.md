@@ -460,7 +460,7 @@ DT_DELETE_VALIDATE_INTERVAL_SECONDS=30
 ## 11. Referência de API
 
 Referência Swagger:
-Use seu próprio ID de tenant para validação e verificação: `https://YOUR_TENANT_ID.apps.dynatrace.com/platform/swagger-ui/index.html#`
+Use seu próprio ID de tenant para validação e verificação: `https://YOUR_TENANT_ID.apps.dynatrace.com/platform/swagger-ui/index.html?urls.primaryName=Grail+-+Storage+Record+Deletion`
 
 | Operação | Endpoint | Método |
 | --- | --- | --- |
