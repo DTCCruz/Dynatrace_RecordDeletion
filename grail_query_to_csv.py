@@ -17,6 +17,7 @@ import argparse
 import csv
 import json
 import os
+import sys
 import time
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -54,6 +55,15 @@ def load_env(env_path: str = ".env"):
             os.environ.setdefault(key, val)
 
 
+def ensure_python_version(min_major: int = 3, min_minor: int = 9) -> None:
+    if sys.version_info < (min_major, min_minor):
+        found = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        raise SystemExit(
+            f"Unsupported Python version: {found}. "
+            f"Use Python {min_major}.{min_minor}+ to run this script."
+        )
+
+
 def normalize_environment(env: str) -> str:
     env = env.strip().rstrip("/")
     if env.startswith("http://") or env.startswith("https://"):
@@ -65,6 +75,13 @@ def normalize_environment(env: str) -> str:
         return "https://" + env
 
     return f"https://{env}.apps.dynatrace.com"
+
+
+def build_validation_query(query: str) -> str:
+    validation_query = query.strip()
+    if "| limit" not in validation_query.lower():
+        validation_query = f"{validation_query} | limit 1"
+    return validation_query
 
 
 def run_query(base_url: str, token: str, query: str, tf_start: str, tf_end: str) -> tuple[dict, str]:
@@ -266,6 +283,80 @@ def delete_records_in_grail(base_url: str, token: str, delete_query: str, tf_sta
         time.sleep(5)
 
     raise TimeoutError(f"delete task timeout: {task_id}")
+
+
+def validate_query_permission(base_url: str, token: str, query: str, tf_start: str, tf_end: str) -> tuple[bool, str]:
+    try:
+        validation_query = build_validation_query(query)
+        run_query(base_url, token, validation_query, tf_start, tf_end)
+        return True, "query access check passed"
+    except Exception as exc:
+        message = str(exc)
+        if "status 401" in message or "status 403" in message:
+            return False, f"query permission check failed: {message}"
+        return False, f"query preflight failed: {message}"
+
+
+def validate_delete_permission(base_url: str, token: str) -> tuple[bool, str]:
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+    }
+    status_url = f"{base_url}/platform/storage/record/v1/delete:status"
+    try:
+        resp = requests.post(status_url, headers=headers, json={"taskId": "permission-check"}, timeout=30)
+    except requests.RequestException as exc:
+        return False, f"delete permission check request failed: {exc}"
+
+    if resp.status_code in (401, 403):
+        return False, f"delete permission check failed with HTTP {resp.status_code}"
+
+    # 200/400/404/422 all indicate authenticated access to endpoint.
+    if resp.status_code in (200, 400, 404, 422):
+        return True, "delete access check passed"
+
+    return False, f"delete permission check returned unexpected HTTP {resp.status_code}: {resp.text[:300]}"
+
+
+def run_preflight_checks(
+    base_url: str,
+    token: str,
+    query: str,
+    tf_start: str,
+    tf_end: str,
+    cleanup_requested: bool,
+    dry_run_delete: bool,
+    delete_query: str,
+    delete_tf_end: str,
+) -> bool:
+    print("Running preflight checks...")
+
+    query_ok, query_msg = validate_query_permission(base_url, token, query, tf_start, tf_end)
+    print(f"  Query access: {query_msg}")
+    if not query_ok:
+        return False
+
+    if cleanup_requested or dry_run_delete:
+        if not delete_query:
+            print("  Delete preflight: missing delete query")
+            return False
+        if "| limit" in delete_query.lower():
+            print("  Delete preflight: delete query must not contain limit")
+            return False
+
+        delete_end_ts = parse_iso8601(delete_tf_end)
+        if delete_end_ts > (datetime.now(timezone.utc) - timedelta(hours=4)):
+            print("  Delete preflight: delete end time must be at least 4 hours in the past")
+            return False
+
+        delete_ok, delete_msg = validate_delete_permission(base_url, token)
+        print(f"  Delete access: {delete_msg}")
+        if not delete_ok:
+            return False
+
+    print("Preflight checks passed.")
+    return True
 
 
 def count_records_in_grail(base_url: str, token: str, delete_query: str, tf_start: str, tf_end: str) -> int:
@@ -837,6 +928,7 @@ def save_json_records_to_csv(records, out_file):
 
 
 def main():
+    ensure_python_version(3, 9)
     load_env(".env")
 
     parser = argparse.ArgumentParser(
@@ -859,6 +951,10 @@ def main():
                         help="CSV output path (fallback: DT_OUT)")
     parser.add_argument("--cleanup", action="store_true",
                         help="Prompt and hard-delete matching Grail records after CSV export (prefers DT_CLEANUP true/false)")
+    parser.add_argument("--dry-run-delete", action="store_true",
+                        help="Analyze delete workload and validate permissions, but do not send delete requests")
+    parser.add_argument("--validate-config", action="store_true",
+                        help="Run configuration and permission checks, then exit without exporting/deleting")
     args = parser.parse_args()
 
     environment = args.environment or os.getenv("DT_ENVIRONMENT")
@@ -881,8 +977,18 @@ def main():
     if not query:
         raise SystemExit("Missing --query or DT_QUERY")
 
+    # Narrow Optional values to concrete strings for runtime and static analysis.
+    environment = environment.strip()
+    token = token.strip()
+    query = query.strip()
+    delete_query = (delete_query or "").strip()
+
     cleanup_env = os.getenv("DT_CLEANUP", "false").strip().lower() in ("1", "true", "yes")
     cleanup_flag = args.cleanup or cleanup_env
+    dry_run_delete_flag = args.dry_run_delete
+
+    if dry_run_delete_flag and cleanup_flag:
+        print("--dry-run-delete is enabled; delete requests will not be executed.")
 
     # Resolve timestamp timezone for CSV filename (API timeframes always stay UTC)
     tz_name = os.getenv("DT_TIMEZONE", "").strip()
@@ -895,7 +1001,6 @@ def main():
     else:
         file_tz = datetime.now().astimezone().tzinfo or timezone.utc  # system local time
     base_url = normalize_environment(environment)
-    token = token.strip()
     dt_to_env = os.getenv("DT_TO")
     dt_from_env = os.getenv("DT_FROM")
 
@@ -945,6 +1050,27 @@ def main():
 
     delete_window_exceeds_export = delete_from_ts < from_ts or delete_to_ts > to_ts
 
+    preflight_ok = run_preflight_checks(
+        base_url,
+        token,
+        query,
+        tf_start,
+        tf_end,
+        cleanup_requested=cleanup_flag,
+        dry_run_delete=dry_run_delete_flag,
+        delete_query=delete_query,
+        delete_tf_end=delete_tf_end,
+    )
+
+    if args.validate_config:
+        if preflight_ok:
+            print("Configuration validation completed successfully.")
+            return
+        raise SystemExit("Configuration validation failed.")
+
+    if not preflight_ok:
+        raise SystemExit("Preflight checks failed.")
+
     print(f"Running grail query from {tf_start} to {tf_end}")
 
     result, request_token = run_query(base_url, token, query, tf_start, tf_end)
@@ -977,20 +1103,20 @@ def main():
     else:
         raise SystemExit("No query result records found and no request token for download")
 
-    if cleanup_flag:
+    if cleanup_flag or dry_run_delete_flag:
         if not delete_query:
-            print("Cleanup requested, but no delete query provided (use --delete-query or DT_DELETE_QUERY).")
+            print("Delete preparation requested, but no delete query provided (use --delete-query or DT_DELETE_QUERY).")
         elif "| limit" in delete_query.lower():
-            print("Cleanup skipped: record deletion query must not contain limit.")
+            print("Delete preparation skipped: record deletion query must not contain limit.")
         elif delete_to_ts > (datetime.now(timezone.utc) - timedelta(hours=4)):
-            print("Cleanup skipped: deletion end time must be at least 4 hours in the past.")
+            print("Delete preparation skipped: deletion end time must be at least 4 hours in the past.")
         else:
             # Calculate number of 24-hour chunks needed for delete window
             try:
                 chunks = calculate_24h_chunks(delete_tf_start, delete_tf_end)
                 chunk_count = len(chunks)
             except ValueError as e:
-                print(f"Cleanup skipped: {e}")
+                print(f"Delete preparation skipped: {e}")
                 chunks = []
                 chunk_count = 0
 
@@ -1016,6 +1142,16 @@ def main():
                 )
                 print_chunk_estimate_table(chunk_metrics)
                 print_chunk_estimate_totals(chunk_metrics)
+
+                if dry_run_delete_flag:
+                    pre_count = count_records_in_grail(base_url, token, delete_query, delete_tf_start, delete_tf_end)
+                    if pre_count >= 0:
+                        print(f"Dry-run delete check: {pre_count:,} matching record(s) currently visible.")
+                    else:
+                        print("Dry-run delete check: could not determine matching record count.")
+                    print("Dry-run mode: no delete requests were sent.")
+                    print(f"Local file retained: {out_path}")
+                    return
 
                 confirmed = confirm_hard_delete_chunked(delete_query, delete_tf_start, delete_tf_end, out_path, chunk_count)
                 if not confirmed:

@@ -6,11 +6,11 @@ Use this guide as an operator manual: what to configure, what to run, what to ex
 
 > **IMPORTANT DISCLAIMER - LEGAL NOTICE**
 >
-> - This script was developed solely to assist **CIELO** with Grail data export and deletion workflows.
+> - This script was developed solely to assist **{{CUSTOMER_NAME}}** with Grail data export and deletion workflows.
 > - This script is provided **AS IS**, as a **BEST-EFFORT STARTING POINT**, and is **NOT A DYNATRACE PRODUCT**.
 > - Dynatrace provides **NO WARRANTIES**, **NO OFFICIAL SUPPORT**, and **NO VERSIONING OR MAINTENANCE COMMITMENTS** for this script.
 > - Record deletion is an existing capability of Dynatrace APIs. This script only demonstrates one possible approach for customer-managed data control in Grail.
-> - **CIELO** acknowledges responsibility for installation, customization, implementation, validation, security review, and ongoing operation, with **NO FUTURE SUPPORT COMMITMENT** from Dynatrace.
+> - **{{CUSTOMER_NAME}}** acknowledges responsibility for installation, customization, implementation, validation, security review, and ongoing operation, with **NO FUTURE SUPPORT COMMITMENT** from Dynatrace.
 
 ---
 
@@ -51,7 +51,7 @@ Typical safe usage is:
 
 | Requirement | Details |
 | --- | --- |
-| Python | 3.11+ (tested on 3.13) |
+| Python | 3.9+ (tested on 3.13) |
 | Python package | `requests` |
 | Dynatrace token scopes | `storage:logs:read` and `storage:records:delete` |
 | Working directory | Folder containing `.env` and `grail_query_to_csv.py` |
@@ -82,13 +82,19 @@ cp env.txt .env
 
 Then edit `.env` and set `DT_ENVIRONMENT`, `DT_TOKEN`, `DT_QUERY`, `DT_FROM`, `DT_TO`, and `DT_OUT`.
 
-### Step 2: Run export only
+### Step 2: Validate configuration and permissions
+
+```text
+./.venv/bin/python grail_query_to_csv.py --validate-config
+```
+
+### Step 3: Run export only
 
 ```text
 ./.venv/bin/python grail_query_to_csv.py
 ```
 
-### Step 3: Verify output CSV
+### Step 4: Verify output CSV
 
 Confirm:
 
@@ -96,17 +102,23 @@ Confirm:
 2. Timestamps and columns look correct.
 3. Record volume is in expected range.
 
-### Step 4: Enable cleanup only if needed
+### Step 5: Enable cleanup only if needed
 
 Use either:
 
 1. `DT_CLEANUP=true` in `.env`, or
 2. `--cleanup` on the command line.
 
-### Step 5: Run cleanup
+### Step 6: Run cleanup
 
 ```text
 ./.venv/bin/python grail_query_to_csv.py --cleanup
+```
+
+Optional safety command before cleanup:
+
+```text
+./.venv/bin/python grail_query_to_csv.py --cleanup --dry-run-delete
 ```
 
 ---

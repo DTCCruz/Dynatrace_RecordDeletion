@@ -24,23 +24,25 @@ Description:
   Replaces {{CUSTOMER_NAME}} and removes legacy internal template-note lines.
 
 Modes:
-  default      Updates existing runbooks in place
+  default      Auto-generates output directory: customer-ready-<customer>-<YYYYMMDD>
   --output-dir Creates customer-ready copies in the specified directory
 
 Scope:
   Processes RUNBOOK.md, RUNBOOK_BR.md, and RUNBOOK_ES.md
 
 Customer package files:
-  --output-dir Also copies grail_query_to_csv.py and env.txt to DIR/
-
-Compatibility note:
-  --include-public / -include-public are accepted but ignored.
+  Also copies grail_query_to_csv.py and env.txt to the output directory.
 
 Examples:
-  ./prepare_customer_runbooks.sh Cielo
-  ./prepare_customer_runbooks.sh --customer Banco do Brasil
-  ./prepare_customer_runbooks.sh --customer Banco do Brasil --output-dir dist-bdb
+  ./prepare_customer_runbooks.sh ACME
+  ./prepare_customer_runbooks.sh --customer "ACME Corp"
+  ./prepare_customer_runbooks.sh --customer "ACME Corp" --output-dir customer-ready-acme-20260324
 EOF
+}
+
+slugify_customer_name() {
+  local input="$1"
+  echo "$input" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g'
 }
 
 replace_customer_name() {
@@ -56,6 +58,9 @@ replace_customer_name() {
 
     s/(^> - Este script foi desenvolvido exclusivamente para auxiliar \*\*)([^*]+)(\*\* nos fluxos de exportação e exclusão de dados no Grail\.$)/$1$ENV{CUSTOMER_NAME}$3/gm;
     s/(^> - \*\*)([^*]+)(\*\* reconhece responsabilidade por instalação, customização, implementação, validação, revisão de segurança e operação contínua, sem \*\*COMPROMISSO DE SUPORTE FUTURO\*\* da Dynatrace\.$)/$1$ENV{CUSTOMER_NAME}$3/gm;
+
+    s/(^> - Este script fue desarrollado exclusivamente para auxiliar a \*\*)([^*]+)(\*\* en flujos de exportación y eliminación de datos en Grail\.$)/$1$ENV{CUSTOMER_NAME}$3/gm;
+    s/(^> - \*\*)([^*]+)(\*\* reconoce responsabilidad por instalación, personalización, implementación, validación, revisión de seguridad y operación continua, sin \*\*COMPROMISO DE SOPORTE FUTURO\*\* de Dynatrace\.$)/$1$ENV{CUSTOMER_NAME}$3/gm;
   ' "$file_path"
 
   perl -0pi -e 's/^[ \t]*> - \*\*Template note for Dynatrace SEs:\*\*.*\n//mg; s/^[ \t]*> - \*\*Nota de template para SEs Dynatrace:\*\*.*\n//mg;' "$file_path"
@@ -75,6 +80,45 @@ copy_if_exists() {
   return 0
 }
 
+generate_manifest() {
+  local output_abs="$1"
+  local customer_name="$2"
+  shift 2
+  local files=("$@")
+  local manifest_path="${output_abs}/MANIFEST.txt"
+
+  {
+    echo "Customer Package Manifest"
+    echo "GeneratedAtUTC: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    echo "Customer: ${customer_name}"
+    echo "SourceDirectory: ${script_dir}"
+    echo
+    echo "Files:"
+    for rel in "${files[@]}"; do
+      echo "- ${rel}"
+    done
+    echo "- grail_query_to_csv.py"
+    echo "- env.txt"
+
+    if command -v shasum >/dev/null 2>&1; then
+      echo
+      echo "SHA256:"
+      for rel in "${files[@]}"; do
+        if [[ -f "${output_abs}/${rel}" ]]; then
+          hash_val="$(shasum -a 256 "${output_abs}/${rel}" | awk '{print $1}')"
+          echo "- ${rel}: ${hash_val}"
+        fi
+      done
+      for rel in grail_query_to_csv.py env.txt; do
+        if [[ -f "${output_abs}/${rel}" ]]; then
+          hash_val="$(shasum -a 256 "${output_abs}/${rel}" | awk '{print $1}')"
+          echo "- ${rel}: ${hash_val}"
+        fi
+      done
+    fi
+  } >"${manifest_path}"
+}
+
 if [[ $# -eq 0 ]]; then
   usage
   exit 1
@@ -82,7 +126,6 @@ fi
 
 customer_name=""
 output_dir=""
-include_public="false"
 
 if [[ "$1" != --* ]]; then
   customer_name="$1"
@@ -120,7 +163,7 @@ else
         shift
         ;;
       --include-public|-include-public)
-        include_public="true"
+        # Legacy flag kept for backward compatibility (no-op).
         shift
         ;;
       -h|--help)
@@ -142,11 +185,17 @@ if [[ -z "$customer_name" ]]; then
   exit 1
 fi
 
-if [[ "$include_public" == "true" ]]; then
-  echo "Warning: --include-public is deprecated and ignored." >&2
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ -z "$output_dir" ]]; then
+  customer_slug="$(slugify_customer_name "$customer_name")"
+  if [[ -z "$customer_slug" ]]; then
+    customer_slug="customer"
+  fi
+  output_dir="customer-ready-${customer_slug}-$(date +%Y%m%d)"
+  echo "No --output-dir provided. Using: ${output_dir}"
 fi
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "$output_dir" = /* ]]; then
   output_abs="$output_dir"
 else
@@ -158,23 +207,6 @@ files=(
   "RUNBOOK_BR.md"
   "RUNBOOK_ES.md"
 )
-
-if [[ -z "$output_dir" ]]; then
-  for rel in "${files[@]}"; do
-    src="${script_dir}/${rel}"
-
-    if [[ ! -f "$src" ]]; then
-      echo "Skipping missing template: $rel" >&2
-      continue
-    fi
-
-    replace_customer_name "$src" "$customer_name"
-    echo "Updated in place: $rel"
-  done
-
-  echo "Updated existing runbooks in place for customer: ${customer_name}"
-  exit 0
-fi
 
 mkdir -p "$output_abs"
 
@@ -197,6 +229,9 @@ copy_if_exists "${script_dir}/grail_query_to_csv.py" "${output_abs}/grail_query_
   echo " - ${output_dir}/grail_query_to_csv.py"
 copy_if_exists "${script_dir}/env.txt" "${output_abs}/env.txt" && \
   echo " - ${output_dir}/env.txt"
+
+generate_manifest "${output_abs}" "${customer_name}" "${files[@]}"
+echo " - ${output_dir}/MANIFEST.txt"
 
 echo "Generated customer-ready runbooks in: ${output_abs}"
 for rel in "${files[@]}"; do

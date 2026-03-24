@@ -6,11 +6,11 @@ Use este guia como manual operacional: o que configurar, o que executar, o que e
 
 > **AVISO IMPORTANTE - COMUNICADO LEGAL**
 >
-> - Este script foi desenvolvido exclusivamente para auxiliar **CIELO** nos fluxos de exportação e exclusão de dados no Grail.
+> - Este script foi desenvolvido exclusivamente para auxiliar **{{CUSTOMER_NAME}}** nos fluxos de exportação e exclusão de dados no Grail.
 > - Este script é fornecido **AS IS**, como um **PONTO DE PARTIDA EM MELHOR ESFORÇO**, e **NÃO É UM PRODUTO DYNATRACE**.
 > - A Dynatrace não oferece **NENHUMA GARANTIA**, **NENHUM SUPORTE OFICIAL**, nem **COMPROMISSO DE VERSIONAMENTO OU MANUTENÇÃO** para este script.
 > - A exclusão de registros é uma capacidade existente das APIs da Dynatrace. Este script apenas demonstra uma possível abordagem para controle de dados no Grail, gerenciado pelo próprio cliente.
-> - **CIELO** reconhece responsabilidade por instalação, customização, implementação, validação, revisão de segurança e operação contínua, sem **COMPROMISSO DE SUPORTE FUTURO** da Dynatrace.
+> - **{{CUSTOMER_NAME}}** reconhece responsabilidade por instalação, customização, implementação, validação, revisão de segurança e operação contínua, sem **COMPROMISSO DE SUPORTE FUTURO** da Dynatrace.
 
 ---
 
@@ -51,7 +51,7 @@ Uso seguro típico:
 
 | Requisito | Detalhes |
 | --- | --- |
-| Python | 3.11+ (testado em 3.13) |
+| Python | 3.9+ (testado em 3.13) |
 | Pacote Python | `requests` |
 | Escopos do token Dynatrace | `storage:logs:read` e `storage:records:delete` |
 | Diretório de execução | Pasta que contém `.env` e `grail_query_to_csv.py` |
@@ -82,13 +82,19 @@ cp env.txt .env
 
 Depois edite o `.env` e defina `DT_ENVIRONMENT`, `DT_TOKEN`, `DT_QUERY`, `DT_FROM`, `DT_TO` e `DT_OUT`.
 
-### Passo 2: Execute somente exportação
+### Passo 2: Valide configuração e permissões
+
+```text
+./.venv/bin/python grail_query_to_csv.py --validate-config
+```
+
+### Passo 3: Execute somente exportação
 
 ```text
 ./.venv/bin/python grail_query_to_csv.py
 ```
 
-### Passo 3: Verifique o CSV de saída
+### Passo 4: Verifique o CSV de saída
 
 Confirme:
 
@@ -96,17 +102,23 @@ Confirme:
 2. Timestamps e colunas estão corretos.
 3. O volume de registros está dentro do esperado.
 
-### Passo 4: Ative a limpeza somente se necessário
+### Passo 5: Ative a limpeza somente se necessário
 
 Use uma das opções:
 
 1. `DT_CLEANUP=true` no `.env`, ou
 2. `--cleanup` na linha de comando.
 
-### Passo 5: Execute a limpeza
+### Passo 6: Execute a limpeza
 
 ```text
 ./.venv/bin/python grail_query_to_csv.py --cleanup
+```
+
+Comando opcional de segurança antes da limpeza:
+
+```text
+./.venv/bin/python grail_query_to_csv.py --cleanup --dry-run-delete
 ```
 
 ---

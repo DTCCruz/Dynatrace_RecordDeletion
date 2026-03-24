@@ -37,22 +37,33 @@ Dynatrace record deletion in Grail is a native platform capability available thr
 # Ensure dependencies are installed
 python3 -m pip install requests
 
+# Validate configuration and token permissions before execution
+python3 grail_query_to_csv.py --validate-config
+
 # Run the export script
 python3 grail_query_to_csv.py [options]
+
+# Optional: estimate delete impact without deleting records
+python3 grail_query_to_csv.py --cleanup --dry-run-delete
 ```
 
 ### Preparing Customer Runbooks
 
 ```bash
-# Replace customer name in runbooks
+# Generate customer-ready package in an auto-created folder
 ./prepare_customer_runbooks.sh "Customer Name"
 
-# Generate customer-ready copies to a specific directory
-./prepare_customer_runbooks.sh --customer "Customer Name" --output-dir dist-customer
+# Generate customer-ready package (recommended naming includes customer and date)
+./prepare_customer_runbooks.sh --customer "Customer Name" --output-dir customer-ready-customer-name-YYYYMMDD
 
-# Include public runbook variants
-./prepare_customer_runbooks.sh --customer "Customer Name" --include-public
+# Internal SE optional check: validate EN/BR/ES runbook section parity before packaging
+./check_runbook_parity.sh
 ```
+
+Packaging output notes:
+
+- The output directory includes `RUNBOOK.md`, `RUNBOOK_BR.md`, `RUNBOOK_ES.md`, `grail_query_to_csv.py`, `env.txt`, and `MANIFEST.txt`.
+- `MANIFEST.txt` includes package metadata and SHA256 hashes for delivery verification.
 
 ## Configuration
 
