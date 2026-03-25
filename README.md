@@ -40,12 +40,117 @@ python3 -m pip install requests
 # Validate configuration and token permissions before execution
 python3 grail_query_to_csv.py --validate-config
 
-# Run the export script
+# Run the export script (export only, no deletion)
 python3 grail_query_to_csv.py [options]
-
-# Optional: estimate delete impact without deleting records
-python3 grail_query_to_csv.py --cleanup --dry-run-delete
 ```
+
+### Deleting Records from Grail
+
+The script provides a `--cleanup` flag to delete matching records after exporting them to CSV. Deletion uses the native [Dynatrace Record Deletion API](https://docs.dynatrace.com/docs/platform/grail/organize-data/record-deletion-in-grail).
+
+#### Prerequisites for Deletion
+
+1. **API Token Permissions**: The token must have the `storage:buckets:delete` scope in addition to query permissions.
+2. **Time Window Constraint**: The deletion end time (`--delete-to` or `DT_DELETE_TO`) must be at least 4 hours in the past. This is a platform constraint to prevent accidental deletion of actively ingested data.
+3. **Query Requirements**: The delete query must not contain a `| limit` clause.
+
+#### Deletion Workflow
+
+**Step 1: Dry-run validation (recommended)**
+
+Analyze the deletion workload without actually deleting any records:
+
+```bash
+# Estimate records to be deleted and validate permissions
+python3 grail_query_to_csv.py --dry-run-delete
+
+# With custom deletion window (different from export window)
+python3 grail_query_to_csv.py --dry-run-delete \
+  --delete-from "2026-01-01T00:00:00.000000000Z" \
+  --delete-to "2026-03-20T00:00:00.000000000Z"
+```
+
+The dry-run will:
+- Validate token permissions for both query and deletion
+- Break the deletion window into 24-hour chunks (API requirement)
+- Estimate the number of records and data size per chunk
+- Display expected deletion time per chunk
+- Report the total number of matching records currently visible
+
+**Step 2: Export and delete**
+
+Once validated, proceed with the actual export and deletion:
+
+```bash
+# Export to CSV, then prompt for deletion confirmation
+python3 grail_query_to_csv.py --cleanup
+
+# Non-interactive mode (use DT_CLEANUP environment variable)
+DT_CLEANUP=true python3 grail_query_to_csv.py
+```
+
+**Interactive Confirmation**: When `--cleanup` is used, the script will:
+1. Export data to CSV first
+2. Display deletion window and chunk estimates
+3. Prompt: `Proceed with hard delete in Grail? Type 'yes' to continue:`
+4. Only proceed with deletion if you explicitly type `yes`
+
+#### Deletion Process Details
+
+- **Chunked Deletion**: Due to API limits, the script automatically breaks the deletion window into 24-hour chunks and processes them sequentially from oldest to newest.
+- **Progress Tracking**: Real-time progress updates show completion status, observed deletion times, and remaining estimated time.
+- **Post-deletion Validation**: After each chunk, the script queries Grail to confirm records were removed. Configurable via `DT_DELETE_VALIDATE_RETRIES` (default: 12) and `DT_DELETE_VALIDATE_INTERVAL_SECONDS` (default: 10).
+- **Idempotent**: Safe to re-run if interrupted; completed chunks will show zero records and skip quickly.
+
+#### Advanced Deletion Options
+
+**Separate deletion query**
+
+Use a different DQL query for deletion than for export:
+
+```bash
+# Export with one query, delete with another
+python3 grail_query_to_csv.py \
+  --query "fetch logs | filter loglevel == 'DEBUG'" \
+  --delete-query "fetch logs | filter loglevel == 'DEBUG' and dt.entity.host == 'prod-server-1'" \
+  --cleanup
+```
+
+**Custom deletion window**
+
+Delete a different time range than the export window:
+
+```bash
+# Export last 7 months, but only delete records older than 30 days
+python3 grail_query_to_csv.py \
+  --from "2025-08-01T00:00:00.000000000Z" \
+  --to "2026-03-25T00:00:00.000000000Z" \
+  --delete-from "2025-08-01T00:00:00.000000000Z" \
+  --delete-to "2026-02-23T00:00:00.000000000Z" \
+  --cleanup
+```
+
+#### Environment Variables for Deletion
+
+Set these in your `.env` file for deletion configuration:
+
+```bash
+DT_DELETE_QUERY="fetch logs | filter ..."     # Defaults to DT_QUERY if not specified
+DT_DELETE_FROM="2026-01-01T00:00:00.000000000Z"  # Defaults to DT_FROM
+DT_DELETE_TO="2026-03-20T00:00:00.000000000Z"    # Defaults to DT_TO (must be 4+ hours old)
+DT_CLEANUP=true                                # Enable deletion without --cleanup flag
+DT_DELETE_VALIDATE_RETRIES=12                  # Post-delete validation retry count
+DT_DELETE_VALIDATE_INTERVAL_SECONDS=10         # Post-delete validation retry interval
+```
+
+#### Deletion Safety Features
+
+- **Pre-flight checks**: Validates token permissions and query syntax before any operations
+- **Window mismatch warning**: Alerts if deletion window extends beyond export window
+- **Explicit confirmation**: Interactive prompt prevents accidental deletion
+- **CSV export first**: Data is always exported before deletion begins
+- **Validation**: Post-deletion queries confirm records were removed
+- **Interruptible**: Press Ctrl+C to cancel; already-deleted chunks remain deleted, incomplete chunks can be retried
 
 ### Preparing Customer Runbooks
 
