@@ -1232,9 +1232,140 @@ def save_json_records_to_csv(records, out_file):
             writer.writerow(row)
 
 
+def generate_execution_report(
+    out_path: str,
+    query: str,
+    delete_query: str,
+    tf_start: str,
+    tf_end: str,
+    cleanup_mode: bool,
+    estimated_bytes: Optional[int] = None,
+    estimated_cost_usd: Optional[float] = None,
+    actual_billed_bytes: Optional[int] = None,
+    actual_cost_usd: Optional[float] = None,
+    cost_currency: str = "USD",
+    cost_rate: Optional[float] = None,
+    record_count: int = 0,
+    deleted_record_count: int = 0,
+    chunks_processed: int = 0,
+    duration_seconds: float = 0,
+) -> None:
+    """Generate a timestamped execution report markdown file."""
+    try:
+        # Create report filename with timestamp
+        report_dt = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+        report_filename = f"EXECUTION_REPORT_{report_dt}.md"
+        
+        # Get actual CSV file size from disk
+        csv_path = Path(out_path)
+        download_size = csv_path.stat().st_size if csv_path.exists() else 0
+        
+        # Count actual records in CSV (skip header)
+        actual_record_count = 0
+        if csv_path.exists():
+            try:
+                with open(csv_path, 'r', encoding='utf-8') as f:
+                    actual_record_count = sum(1 for _ in f) - 1  # Subtract header row
+            except Exception:
+                actual_record_count = record_count
+        else:
+            actual_record_count = record_count
+        
+        # Calculate GiB from bytes
+        bytes_to_gib = 1024 ** 3
+        estimated_gib = estimated_bytes / bytes_to_gib if estimated_bytes else 0
+        actual_gib = actual_billed_bytes / bytes_to_gib if actual_billed_bytes else 0
+        
+        # Calculate variance if both estimates and actuals exist
+        variance_pct = None
+        if estimated_bytes and actual_billed_bytes:
+            variance_pct = ((actual_billed_bytes - estimated_bytes) / estimated_bytes) * 100
+        
+        # Build report content
+        report = f"""# Execution Report
+
+**Generated:** {datetime.now(tz=timezone.utc).isoformat()}  
+**Status:** ✅ Completed Successfully  
+
+---
+
+## Overview
+
+| Parameter | Value |
+| --- | --- |
+| **Mode** | {'Export + Cleanup' if cleanup_mode else 'Export Only'} |
+| **CSV File** | `{Path(out_path).name}` |
+| **CSV Size** | {download_size:,} bytes ({download_size / 1024 / 1024:.2f} MB) |
+| **Records Exported** | {actual_record_count:,} |
+| **Records Deleted** | {deleted_record_count:,} |
+| **Duration** | {duration_seconds:.1f} seconds |
+
+---
+
+## Query Details
+
+**Export Query:**
+```dql
+{query}
+```
+
+**Delete Query:**
+```dql
+{delete_query if cleanup_mode else 'N/A'}
+```
+
+---
+
+## Data Metrics
+
+| Metric | Value |
+| --- | --- |
+| **Total Records** | {actual_record_count:,} |
+| **Bytes Scanned** | {estimated_bytes or 'N/A':,} bytes ({estimated_gib:.5f} GiB) |
+| **Bytes Deleted** | {actual_billed_bytes or estimated_bytes or 'N/A':,} bytes ({actual_gib:.5f} GiB) |
+
+---
+
+## Cost Analysis - Log Query
+
+| Metric | Value |
+| --- | --- |
+| **Rate Card** | {cost_rate or 'N/A'} {cost_currency}/GiB |
+| **Estimated Cost** | {cost_currency} {estimated_cost_usd or 0:.8f} |
+| **Actual Cost** | {cost_currency} {actual_cost_usd or 'N/A'} |
+| **Variance** | {f'{variance_pct:+.1f}%' if variance_pct is not None else 'N/A'} |
+
+---
+
+## Execution Details
+
+- **Time Window:** {tf_start} to {tf_end}
+- **Cleanup Enabled:** {'Yes' if cleanup_mode else 'No'}
+- **Chunks Processed:** {chunks_processed}
+- **Duration:** {duration_seconds:.1f}s
+
+---
+
+*Report generated automatically by grail_query_to_csv.py*
+"""
+        
+        # Write report to file
+        with open(report_filename, "w", encoding="utf-8") as f:
+            f.write(report)
+        
+        print(f"\n✅ Execution report saved: {report_filename}")
+    
+    except Exception as e:
+        # Non-blocking: report generation failure should not fail the entire script
+        print(f"\n⚠️  Could not generate execution report: {e}")
+
+
 def main():
     ensure_python_version(3, 9)
     load_env(".env")
+    
+    # Track execution start time for report generation
+    execution_start_time = time.time()
 
     parser = argparse.ArgumentParser(
         description="Grail logs query -> CSV with chunk deletion time estimation"
@@ -1591,6 +1722,25 @@ def main():
         print("Remote Grail data kept (not deleted).")
 
     print(f"Local file retained: {out_path}")
+    
+    # Generate execution report
+    execution_duration = time.time() - execution_start_time
+    generate_execution_report(
+        out_path=out_path,
+        query=query,
+        delete_query=delete_query,
+        tf_start=tf_start,
+        tf_end=tf_end,
+        cleanup_mode=cleanup_flag,
+        record_count=record_count if 'record_count' in dir() else 0,
+        estimated_bytes=total_scanned_bytes if 'total_scanned_bytes' in dir() else None,
+        estimated_cost_usd=estimated_cost_usd if 'estimated_cost_usd' in dir() else None,
+        actual_billed_bytes=actual_billed_bytes if 'actual_billed_bytes' in dir() else None,
+        actual_cost_usd=actual_cost_usd if 'actual_cost_usd' in dir() else None,
+        cost_currency=cost_currency,
+        cost_rate=rate_usd_per_gib if 'rate_usd_per_gib' in dir() else None,
+        duration_seconds=execution_duration,
+    )
 
 
 if __name__ == "__main__":
