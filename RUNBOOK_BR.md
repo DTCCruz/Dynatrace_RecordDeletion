@@ -14,6 +14,17 @@ Use este guia como manual operacional: o que configurar, o que executar, o que e
 
 ---
 
+> **AVISO DE CUSTOS**
+>
+> - O uso desta ferramenta para consultar e excluir dados no Dynatrace Grail **pode incorrer em custos adicionais** baseados no seu modelo de consumo Dynatrace.
+> - Os custos são calculados com base no volume de dados **consultados** (medido em GiB), não no volume de dados excluídos.
+> - Antes de confirmar qualquer operação de exclusão, revise o **custo estimado da consulta** que o script exibe. Esta estimativa é baseada em bytes consultados e sua taxa de cobrança configurada.
+> - Após a conclusão bem-sucedida da exclusão, o script consulta `dt.system.events` para relatar **custos de cobrança reais** para fins de auditoria e comparação.
+> - Configure a taxa de cobrança no arquivo `.env`: `DT_LOG_QUERY_COST_RATE_PER_GIB=<sua_taxa>` (ex: `0.25` por GiB consultado na moeda escolhida).
+> - **Verifique se sua taxa de cobrança corresponde ao seu contrato Dynatrace** antes de executar fluxos de trabalho de exclusão.
+
+---
+
 ## Índice
 
 1. [O que a ferramenta faz](#1-o-que-a-ferramenta-faz)
@@ -312,6 +323,20 @@ Checklist de validação:
 5. O tamanho reportado de payload/download está dentro do limite esperado.
 
 Observação: objetos JSON aninhados e arrays são serializados como strings JSON nas células do CSV.
+
+### 7.1 Validação de integridade do pacote (SHA256 do MANIFEST)
+
+Se você receber um pacote customer-ready com `MANIFEST.txt`, pode validar a integridade dos arquivos antes de usar.
+
+1. Abra o diretório do pacote onde está o `MANIFEST.txt`.
+2. Recalcule o SHA256 dos arquivos entregues.
+3. Compare cada hash calculado com o valor correspondente na seção `SHA256` do `MANIFEST.txt`.
+4. Se algum hash for diferente, o arquivo foi alterado (ou corrompido) após a geração do pacote.
+
+```text
+cd customer-ready-customer-name-YYYYMMDD
+shasum -a 256 RUNBOOK.md RUNBOOK_BR.md RUNBOOK_ES.md grail_query_to_csv.py env.txt
+```
 
 ---
 

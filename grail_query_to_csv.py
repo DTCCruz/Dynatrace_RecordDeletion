@@ -176,6 +176,79 @@ def format_bytes(num_bytes: int) -> str:
     return f"{num_bytes} B"
 
 
+def format_currency(amount: float, currency: str = "USD") -> str:
+    code = (currency or "USD").strip().upper()
+    symbol = "R$" if code == "BRL" else "$"
+    return f"{symbol}{amount:,.4f}"
+
+
+def parse_positive_float(raw: str) -> Optional[float]:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def load_cost_rate_per_gib(
+    env_rate: Optional[str],
+    legacy_env_rate: Optional[str],
+) -> tuple[Optional[float], str]:
+    env_rate_value = parse_positive_float(env_rate or "")
+    if env_rate_value is not None:
+        return env_rate_value, "env:DT_LOG_QUERY_COST_RATE_PER_GIB"
+
+    legacy_rate_value = parse_positive_float(legacy_env_rate or "")
+    if legacy_rate_value is not None:
+        return legacy_rate_value, "env:DT_LOG_QUERY_COST_RATE_USD_PER_GIB (legacy)"
+
+    return None, (
+        "not configured (set DT_LOG_QUERY_COST_RATE_PER_GIB in .env; "
+        "legacy DT_LOG_QUERY_COST_RATE_USD_PER_GIB is also supported)"
+    )
+
+
+def load_cost_currency(env_currency: Optional[str]) -> str:
+    value = (env_currency or "").strip().upper()
+    if value in ("USD", "BRL"):
+        return value
+    return "USD"
+
+
+def extract_scanned_bytes(obj: object) -> int:
+    if isinstance(obj, bool):
+        return -1
+    if isinstance(obj, (int, float)):
+        return int(obj)
+    if isinstance(obj, str):
+        parsed = parse_positive_float(obj)
+        return int(parsed) if parsed is not None else -1
+
+    best = -1
+
+    def _walk(node: object) -> None:
+        nonlocal best
+        if isinstance(node, dict):
+            for key, value in node.items():
+                normalized = str(key).replace("_", "").replace("-", "").lower()
+                if normalized in ("scannedbytes", "queryscannedbytes", "bytesscanned", "readbytes"):
+                    candidate = extract_scanned_bytes(value)
+                    if candidate >= 0:
+                        best = max(best, candidate)
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(obj)
+    return best
+
+
 def estimate_records_json_size_bytes(records) -> int:
     """Estimate UTF-8 payload size of in-memory records using compact JSON serialization."""
     total_bytes = 0
@@ -500,20 +573,21 @@ def extract_first_numeric_value(record: dict) -> int:
     return -1
 
 
-def query_chunk_record_count(base_url: str, token: str, delete_query: str, tf_start: str, tf_end: str) -> int:
+def query_chunk_record_count(base_url: str, token: str, delete_query: str, tf_start: str, tf_end: str) -> tuple[int, int]:
     count_query = f"{delete_query.strip()} | summarize __count=count()"
     try:
         result, _ = run_query(base_url, token, count_query, tf_start, tf_end)
         records = result.get("result", {}).get("records") or []
+        scanned_bytes = extract_scanned_bytes(result)
         if not records:
-            return 0
+            return 0, scanned_bytes
         first = records[0]
         if isinstance(first, dict):
-            return max(0, extract_first_numeric_value(first))
-        return -1
+            return max(0, extract_first_numeric_value(first)), scanned_bytes
+        return -1, scanned_bytes
     except Exception as exc:
         print(f"Chunk count query failed for {tf_start} to {tf_end}: {exc}")
-        return -1
+        return -1, -1
 
 
 def query_chunk_size_estimate(
@@ -618,6 +692,215 @@ def print_chunk_estimate_totals(chunk_metrics: list[dict]):
     )
 
 
+def estimate_delete_query_cost(
+    chunk_metrics: list[dict],
+    rate_usd_per_gib: Optional[float],
+) -> tuple[int, Optional[float], int, int]:
+    known_scan_values = [
+        int(m.get("scanned_bytes", -1))
+        for m in chunk_metrics
+        if int(m.get("scanned_bytes", -1)) >= 0
+    ]
+    total_scanned_bytes = sum(known_scan_values)
+    known_chunks = len(known_scan_values)
+    total_chunks = len(chunk_metrics)
+
+    if rate_usd_per_gib is None or total_scanned_bytes <= 0:
+        return total_scanned_bytes, None, known_chunks, total_chunks
+
+    scanned_gib = total_scanned_bytes / float(1024 ** 3)
+    estimated_cost = scanned_gib * rate_usd_per_gib
+    return total_scanned_bytes, estimated_cost, known_chunks, total_chunks
+
+
+def print_delete_query_cost_summary(
+    total_scanned_bytes: int,
+    estimated_cost_usd: Optional[float],
+    rate_usd_per_gib: Optional[float],
+    rate_source: str,
+    known_chunks: int,
+    total_chunks: int,
+    cost_currency: str,
+) -> None:
+    print("\nEstimated query scan/cost for delete workflow:")
+    if total_scanned_bytes > 0:
+        print(
+            f"  Scanned bytes (estimated from chunk count queries): "
+            f"{total_scanned_bytes:,} ({format_bytes(total_scanned_bytes)})"
+        )
+    else:
+        print("  Scanned bytes: unknown")
+
+    print(f"  Coverage: {known_chunks}/{total_chunks} chunk(s) reported scanned_bytes")
+
+    if rate_usd_per_gib is None:
+        print(
+            "  Rate card: not configured "
+            "(set DT_LOG_QUERY_COST_RATE_PER_GIB in .env)"
+        )
+        print("  Estimated cost: unknown")
+        return
+
+    print(f"  Rate card source: {rate_source}")
+    print(f"  Rate card: {format_currency(rate_usd_per_gib, cost_currency)} per GiB scanned")
+    if estimated_cost_usd is None:
+        print("  Estimated cost: unknown (missing scanned_bytes)")
+        return
+
+    print(f"  Estimated cost for current delete query: {format_currency(estimated_cost_usd, cost_currency)}")
+
+
+def query_actual_delete_cost(
+    base_url: str,
+    token: str,
+    delete_query: str,
+    tf_start: str,
+    tf_end: str,
+    rate_usd_per_gib: Optional[float],
+) -> tuple[Optional[int], Optional[float], Optional[str]]:
+    """
+    Query dt.system.events for actual billed_bytes from the delete operation.
+    Returns (billed_bytes, actual_cost_usd, error_message).
+    Non-blocking: returns (None, None, error_msg) if query fails.
+    """
+    try:
+        headers = {
+            "accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        }
+        
+        # Query dt.system.events for BILLING_USAGE_EVENT records within the delete window
+        dql_query = (
+            'fetch dt.system.events '
+            '| filter event.kind == "BILLING_USAGE_EVENT" '
+            'and matchesPhrase(event.type, "Query") '
+            f'and timestamp >= toTimestamp("{tf_start}") '
+            f'and timestamp < toTimestamp("{tf_end}") '
+            '| summarize total_billed_bytes = sum(billed_bytes)'
+        )
+        
+        payload = {
+            "defaultTimeframeStart": tf_start,
+            "defaultTimeframeEnd": tf_end,
+            "enablePreview": False,
+            "enforceQueryConsumptionLimit": False,
+            "fetchTimeoutSeconds": 600,
+            "query": dql_query,
+        }
+        
+        # Try v2 first, fallback to v1
+        query_v2_url = f"{base_url}/platform/query/v2/query:execute"
+        query_v1_url = f"{base_url}/api/v2/query/queryExecutionEngine:execute"
+        
+        resp = None
+        last_error = None
+        for url in [query_v2_url, query_v1_url]:
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=300)
+                if resp.status_code == 200:
+                    break
+                last_error = f"status {resp.status_code}"
+            except Exception as e:
+                last_error = str(e)
+        
+        if resp is None or resp.status_code != 200:
+            error_detail = last_error
+            if resp is not None and resp.status_code == 403:
+                try:
+                    error_body = resp.text[:500]  # First 500 chars of response
+                    error_detail = f"status 403 (Forbidden) - {error_body}"
+                except:
+                    error_detail = "status 403 (Forbidden)"
+            return None, None, f"Could not query billing data: {error_detail}"
+        
+        result = resp.json()
+        records = result.get("result", {}).get("records", [])
+        
+        if not records:
+            return 0, 0.0, None
+        
+        first_record = records[0]
+        billed_bytes = first_record.get("total_billed_bytes")
+        
+        if billed_bytes is None:
+            return None, None, "Billing query did not return billed_bytes"
+        
+        billed_bytes = int(billed_bytes) if isinstance(billed_bytes, (int, float)) else None
+        if billed_bytes is None:
+            return None, None, "Could not parse billed_bytes from query result"
+        
+        actual_cost = None
+        if rate_usd_per_gib is not None and billed_bytes > 0:
+            billed_gib = billed_bytes / float(1024 ** 3)
+            actual_cost = billed_gib * rate_usd_per_gib
+        
+        return billed_bytes, actual_cost, None
+        
+    except Exception as exc:
+        return None, None, f"Billing query error: {str(exc)}"
+
+
+def calculate_cost_variance(
+    estimated_bytes: int,
+    estimated_cost: Optional[float],
+    actual_bytes: Optional[int],
+    actual_cost: Optional[float],
+) -> tuple[Optional[float], Optional[str]]:
+    """
+    Calculate percentage variance between estimate and actual.
+    Returns (variance_percent, variance_string).
+    """
+    if actual_bytes is None or estimated_bytes <= 0:
+        return None, "not available"
+    
+    variance_percent = ((actual_bytes - estimated_bytes) / estimated_bytes) * 100
+    if variance_percent >= 0:
+        return variance_percent, f"+{variance_percent:.1f}%"
+    return variance_percent, f"-{abs(variance_percent):.1f}%"
+
+
+def print_actual_delete_cost_summary(
+    actual_billed_bytes: int,
+    actual_cost_usd: Optional[float],
+    rate_usd_per_gib: Optional[float],
+    estimated_bytes: int,
+    estimated_cost: Optional[float],
+    cost_currency: str,
+) -> None:
+    """
+    Display actual billing cost from dt.system.events after deletion completes.
+    """
+    print("\nActual query cost from dt.system.events:")
+    print(
+        f"  Billed bytes: {actual_billed_bytes:,} ({format_bytes(actual_billed_bytes)})"
+    )
+    
+    variance_percent, variance_str = calculate_cost_variance(
+        estimated_bytes,
+        estimated_cost,
+        actual_billed_bytes,
+        actual_cost_usd,
+    )
+    
+    if rate_usd_per_gib is None:
+        print("  Rate card: not configured")
+        print("  Actual cost: unknown")
+    elif actual_cost_usd is None:
+        print(f"  Rate card: {format_currency(rate_usd_per_gib, cost_currency)} per GiB scanned")
+        print("  Actual cost: could not calculate")
+    else:
+        print(f"  Rate card: {format_currency(rate_usd_per_gib, cost_currency)} per GiB scanned")
+        print(f"  Actual cost: {format_currency(actual_cost_usd, cost_currency)}")
+    
+    if variance_percent is not None and estimated_cost is not None:
+        variance_abs = abs(estimated_cost - (actual_cost_usd or 0))
+        print(
+            f"  Variance from estimate: {variance_str} "
+            f"({format_currency(variance_abs, cost_currency)})"
+        )
+
+
 def build_chunk_estimates(
     base_url: str,
     token: str,
@@ -633,7 +916,7 @@ def build_chunk_estimates(
         chunk_duration_hours = (parse_iso8601(chunk_end) - parse_iso8601(chunk_start)).total_seconds() / 3600
         print(f"  Chunk {i}/{len(chunks)} ({chunk_duration_hours:.1f}h): {chunk_start[:10]} to {chunk_end[:10]}")
 
-        records_count = query_chunk_record_count(base_url, token, delete_query, chunk_start, chunk_end)
+        records_count, scanned_bytes = query_chunk_record_count(base_url, token, delete_query, chunk_start, chunk_end)
         sample_count, sample_bytes = query_chunk_size_estimate(
             base_url,
             token,
@@ -663,6 +946,7 @@ def build_chunk_estimates(
                 "start": chunk_start,
                 "end": chunk_end,
                 "records": records_count,
+                "scanned_bytes": scanned_bytes,
                 "bytes_est": bytes_est,
                 "sample_count": sample_count,
                 "sample_bytes": sample_bytes,
@@ -834,16 +1118,37 @@ def delete_records_in_chunks(
     return True
 
 
-def confirm_hard_delete_chunked(delete_query: str, tf_start: str, tf_end: str, out_path: str, chunk_count: int) -> bool:
+def confirm_hard_delete_chunked(
+    delete_query: str,
+    tf_start: str,
+    tf_end: str,
+    out_path: str,
+    chunk_count: int,
+    estimated_cost_usd: Optional[float],
+    total_scanned_bytes: int,
+    rate_usd_per_gib: Optional[float],
+    cost_currency: str,
+) -> bool:
     print("\nCSV export completed.")
     print(f"Local file retained: {out_path}")
     print("Hard delete will permanently remove matching records from Grail.")
     print(f"Delete timeframe: {tf_start} -> {tf_end}")
     print(f"Delete will proceed in {chunk_count} chunks (24 hours each) due to API limits.")
+    if total_scanned_bytes > 0:
+        print(f"Estimated scanned bytes for this delete workflow: {format_bytes(total_scanned_bytes)}")
+    if rate_usd_per_gib is not None and estimated_cost_usd is not None:
+        print(
+            f"Estimated query cost at configured rate ({format_currency(rate_usd_per_gib, cost_currency)}/GiB): "
+            f"{format_currency(estimated_cost_usd, cost_currency)}"
+        )
+    elif rate_usd_per_gib is not None:
+        print("Configured rate card is present, but estimated cost is unknown (missing scanned_bytes).")
+    else:
+        print("No rate card configured; estimated query cost is unknown.")
     print("Review the estimate above before deciding.")
     print(f"Delete query: {delete_query}")
     try:
-        answer = input("Proceed with hard delete in Grail? Type 'yes' to continue: ").strip().lower()
+        answer = input("Proceed with hard delete in Grail? [y/N]: ").strip().lower()
     except EOFError:
         print("No interactive input available; skipping hard delete.")
         return False
@@ -961,6 +1266,15 @@ def main():
     token = args.token or os.getenv("DT_TOKEN")
     query = args.query or os.getenv("DT_QUERY")
     delete_query = args.delete_query or os.getenv("DT_DELETE_QUERY") or query
+    rate_usd_per_gib, rate_source = load_cost_rate_per_gib(
+        os.getenv("DT_LOG_QUERY_COST_RATE_PER_GIB"),
+        os.getenv("DT_LOG_QUERY_COST_RATE_USD_PER_GIB"),
+    )
+    cost_currency = load_cost_currency(os.getenv("DT_LOG_QUERY_COST_CURRENCY"))
+    billing_validation_enabled = os.getenv(
+        "DT_ENABLE_BILLING_VALIDATION",
+        "false",
+    ).strip().lower() in ("1", "true", "yes")
     try:
         delete_validate_retries = int(os.getenv("DT_DELETE_VALIDATE_RETRIES", "12"))
     except ValueError:
@@ -1143,17 +1457,76 @@ def main():
                 print_chunk_estimate_table(chunk_metrics)
                 print_chunk_estimate_totals(chunk_metrics)
 
+                total_scanned_bytes, estimated_cost_usd, known_chunks, total_chunks = estimate_delete_query_cost(
+                    chunk_metrics,
+                    rate_usd_per_gib,
+                )
+                print_delete_query_cost_summary(
+                    total_scanned_bytes,
+                    estimated_cost_usd,
+                    rate_usd_per_gib,
+                    rate_source,
+                    known_chunks,
+                    total_chunks,
+                    cost_currency,
+                )
+
                 if dry_run_delete_flag:
                     pre_count = count_records_in_grail(base_url, token, delete_query, delete_tf_start, delete_tf_end)
                     if pre_count >= 0:
                         print(f"Dry-run delete check: {pre_count:,} matching record(s) currently visible.")
                     else:
                         print("Dry-run delete check: could not determine matching record count.")
+
+                    if billing_validation_enabled:
+                        # Read-only billing check for the selected timeframe.
+                        # This reports billed query usage already recorded by Dynatrace,
+                        # not the future cost of the pending delete operation itself.
+                        actual_billed_bytes, actual_cost_usd, billing_error = query_actual_delete_cost(
+                            base_url,
+                            token,
+                            delete_query,
+                            delete_tf_start,
+                            delete_tf_end,
+                            rate_usd_per_gib,
+                        )
+                        if billing_error:
+                            print(f"\n⚠️  Dry-run billed cost validation unavailable: {billing_error}")
+                        elif actual_billed_bytes is not None:
+                            print("\nDry-run billed cost validation (historical):")
+                            print_actual_delete_cost_summary(
+                                actual_billed_bytes,
+                                actual_cost_usd,
+                                rate_usd_per_gib,
+                                total_scanned_bytes,
+                                estimated_cost_usd,
+                                cost_currency,
+                            )
+                            print(
+                                "  Note: values above reflect historical query billing events "
+                                "already recorded in this timeframe."
+                            )
+                    else:
+                        print(
+                            "Dry-run billed cost validation skipped "
+                            "(set DT_ENABLE_BILLING_VALIDATION=true to enable)."
+                        )
+
                     print("Dry-run mode: no delete requests were sent.")
                     print(f"Local file retained: {out_path}")
                     return
 
-                confirmed = confirm_hard_delete_chunked(delete_query, delete_tf_start, delete_tf_end, out_path, chunk_count)
+                confirmed = confirm_hard_delete_chunked(
+                    delete_query,
+                    delete_tf_start,
+                    delete_tf_end,
+                    out_path,
+                    chunk_count,
+                    estimated_cost_usd,
+                    total_scanned_bytes,
+                    rate_usd_per_gib,
+                    cost_currency,
+                )
                 if not confirmed:
                     print("Remote delete canceled by user.")
                 else:
@@ -1185,6 +1558,33 @@ def main():
                                 retries=max(1, delete_validate_retries),
                                 interval_seconds=max(1, delete_validate_interval_seconds),
                             )
+                            
+                            # Query actual billing cost from dt.system.events (non-blocking)
+                            if billing_validation_enabled and (rate_usd_per_gib is not None or estimated_cost_usd is not None):
+                                actual_billed_bytes, actual_cost_usd, billing_error = query_actual_delete_cost(
+                                    base_url,
+                                    token,
+                                    delete_query,
+                                    delete_tf_start,
+                                    delete_tf_end,
+                                    rate_usd_per_gib,
+                                )
+                                if billing_error:
+                                    print(f"\n⚠️  {billing_error}")
+                                elif actual_billed_bytes is not None:
+                                    print_actual_delete_cost_summary(
+                                        actual_billed_bytes,
+                                        actual_cost_usd,
+                                        rate_usd_per_gib,
+                                        total_scanned_bytes,
+                                        estimated_cost_usd,
+                                        cost_currency,
+                                    )
+                            elif not billing_validation_enabled:
+                                print(
+                                    "Post-delete billed cost validation skipped "
+                                    "(set DT_ENABLE_BILLING_VALIDATION=true to enable)."
+                                )
                         else:
                             print("Remote record delete did not complete.")
     else:

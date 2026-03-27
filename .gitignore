@@ -4,6 +4,8 @@ Archive.zip
 Public
 Strategy
 customer-ready-*/
+Components_for_Customer_Ready_Runbooks/
+Components_for_buckets_strategy/
 *.csv
 *.xlsx
 *.OLD

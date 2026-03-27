@@ -14,6 +14,17 @@ Use esta guía como manual operacional: qué configurar, qué ejecutar, qué esp
 
 ---
 
+> **AVISO DE COSTOS**
+>
+> - El uso de esta herramienta para consultar y eliminar datos en Dynatrace Grail **puede incurrir en costos adicionales** basados en su modelo de consumo Dynatrace.
+> - Los costos se calculan en función del volumen de datos **consultados** (medido en GiB), no del volumen de datos eliminados.
+> - Antes de confirmar cualquier operación de eliminación, revise el **costo estimado de la consulta** que muestra el script. Esta estimación se basa en bytes consultados y su tarifa de facturación configurada.
+> - Después de que la eliminación se complete exitosamente, el script consulta `dt.system.events` para informar **costos de facturación reales** para propósitos de auditoría y comparación.
+> - Configure la tarifa de facturación en su archivo `.env`: `DT_LOG_QUERY_COST_RATE_PER_GIB=<su_tarifa>` (por ejemplo: `0.25` por GiB consultado en la moneda elegida).
+> - **Verifique que su tarifa de facturación coincida con su contrato Dynatrace** antes de ejecutar flujos de trabajo de eliminación.
+
+---
+
 ## Tabla de Contenidos
 
 1. [Qué hace esta herramienta](#1-qué-hace-esta-herramienta)
@@ -312,6 +323,20 @@ Lista de verificación de validación:
 5. El tamaño de carga/descarga informado está dentro de los límites esperados.
 
 Nota: objetos JSON anidados y matrices se serializan como cadenas JSON en celdas CSV.
+
+### 7.1 Validación de integridad del paquete (SHA256 del MANIFEST)
+
+Si recibe un paquete customer-ready con `MANIFEST.txt`, puede validar la integridad de los archivos antes de usarlo.
+
+1. Abra el directorio del paquete donde está `MANIFEST.txt`.
+2. Recalcule el SHA256 de los archivos entregados.
+3. Compare cada hash calculado con el valor correspondiente en la sección `SHA256` de `MANIFEST.txt`.
+4. Si algún hash es diferente, el archivo fue modificado (o dañado) después de la generación del paquete.
+
+```text
+cd customer-ready-customer-name-YYYYMMDD
+shasum -a 256 RUNBOOK.md RUNBOOK_BR.md RUNBOOK_ES.md grail_query_to_csv.py env.txt
+```
 
 ---
 

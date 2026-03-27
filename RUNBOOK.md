@@ -14,6 +14,17 @@ Use this guide as an operator manual: what to configure, what to run, what to ex
 
 ---
 
+> **COST DISCLAIMER**
+>
+> - Using this toolkit to query and delete data in Dynatrace Grail **may incur additional costs** based on your Dynatrace consumption model.
+> - Costs are calculated based on the volume of data **scanned** (measured in GiB), not the volume of data deleted.
+> - Before confirming any deletion operation, review the **estimated query cost** that the script displays. This estimate is based on scanned bytes and your configured rate card.
+> - After deletion completes successfully, the script queries `dt.system.events` to report **actual billed costs** for audit and comparison purposes.
+> - Configure the cost rate card in your `.env` file: `DT_LOG_QUERY_COST_RATE_PER_GIB=<your_rate>` (e.g., `0.25` per GiB scanned). The value is used directly as a multiplier; no currency conversion is performed. The currency symbol (R$ or $) is display-only. **You must provide the rate in the currency unit of your contract**.
+> - **Verify your rate card matches your Dynatrace contract** before running deletion workflows.
+
+---
+
 ## Table of Contents
 
 1. [What This Tool Does](#1-what-this-tool-does)
@@ -312,6 +323,20 @@ Validation checklist:
 5. Reported payload/download size is within expected limits.
 
 Note: nested JSON objects and arrays are serialized as JSON strings in CSV cells.
+
+### 7.1 Package integrity validation (MANIFEST SHA256)
+
+If you receive a customer-ready package containing `MANIFEST.txt`, you can validate file integrity before use.
+
+1. Open the package directory where `MANIFEST.txt` is located.
+2. Recalculate SHA256 for the delivered files.
+3. Compare each output hash with the corresponding value under `SHA256` in `MANIFEST.txt`.
+4. If any hash is different, the file was modified (or corrupted) after package generation.
+
+```text
+cd customer-ready-customer-name-YYYYMMDD
+shasum -a 256 RUNBOOK.md RUNBOOK_BR.md RUNBOOK_ES.md grail_query_to_csv.py env.txt
+```
 
 ---
 
