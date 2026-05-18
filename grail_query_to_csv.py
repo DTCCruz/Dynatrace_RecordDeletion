@@ -306,6 +306,9 @@ def delete_records_in_grail(base_url: str, token: str, delete_query: str, tf_sta
     execute_url = f"{base_url}/platform/storage/record/v1/delete:execute"
     status_url = f"{base_url}/platform/storage/record/v1/delete:status"
 
+    tf_start = (parse_iso8601(tf_start) + timedelta(hours=3)).isoformat()
+    tf_end = (parse_iso8601(tf_end) + timedelta(hours=3)).isoformat()
+
     payload = {
         "query": delete_query,
         "timeFrame": {
