@@ -24,7 +24,7 @@ Dynatrace record deletion in Grail is a native platform capability available thr
 
 ### Core Files
 
-- **`grail_query_to_csv.py`** - Python script that queries Dynatrace Grail API and exports results to CSV format. Supports environment configuration via `.env` file and command-line arguments for customization.
+- **`grail_query_to_csv.py`** - Python script that queries Dynatrace Grail API and exports results to CSV (default) or JSONL (one JSON object per line, recommended for high-volume extractions that exceed spreadsheet limits). Supports environment configuration via `.env` file and command-line arguments for customization.
 
 - **`RUNBOOK.md`** - English-language runbook with operational procedures and guidelines.
 
@@ -59,7 +59,7 @@ The script provides a `--cleanup` flag to delete matching records after exportin
 
 #### Prerequisites for Deletion
 
-1. **API Token Permissions**: The token must have the `storage:buckets:delete` scope in addition to query permissions.
+1. **API Token Permissions**: The token must have all three scopes: `storage:buckets:delete`, `storage:logs:read`, and `storage:records:delete`.
 2. **Time Window Constraint**: The deletion end time (`--delete-to` or `DT_DELETE_TO`) must be at least 4 hours in the past. This is a platform constraint to prevent accidental deletion of actively ingested data.
 3. **Query Requirements**: The delete query must not contain a `| limit` clause.
 
@@ -74,9 +74,10 @@ Analyze the deletion workload without actually deleting any records:
 python3 grail_query_to_csv.py --dry-run-delete
 
 # With custom deletion window (different from export window)
+# Timestamps without a timezone suffix are interpreted in DT_TIMEZONE.
 python3 grail_query_to_csv.py --dry-run-delete \
-  --delete-from "2026-01-01T00:00:00.000000000Z" \
-  --delete-to "2026-03-20T00:00:00.000000000Z"
+  --delete-from "2026-01-01T00:00:00.000000000" \
+  --delete-to "2026-03-20T00:00:00.000000000"
 ```
 
 The dry-run will:
@@ -131,11 +132,12 @@ Delete a different time range than the export window:
 
 ```bash
 # Export last 7 months, but only delete records older than 30 days
+# Timestamps below are naive and are interpreted in DT_TIMEZONE.
 python3 grail_query_to_csv.py \
-  --from "2025-08-01T00:00:00.000000000Z" \
-  --to "2026-03-25T00:00:00.000000000Z" \
-  --delete-from "2025-08-01T00:00:00.000000000Z" \
-  --delete-to "2026-02-23T00:00:00.000000000Z" \
+  --from "2025-08-01T00:00:00.000000000" \
+  --to "2026-03-25T00:00:00.000000000" \
+  --delete-from "2025-08-01T00:00:00.000000000" \
+  --delete-to "2026-02-23T00:00:00.000000000" \
   --cleanup
 ```
 
@@ -145,12 +147,27 @@ Set these in your `.env` file for deletion configuration:
 
 ```bash
 DT_DELETE_QUERY="fetch logs | filter ..."     # Defaults to DT_QUERY if not specified
-DT_DELETE_FROM="2026-01-01T00:00:00.000000000Z"  # Defaults to DT_FROM
-DT_DELETE_TO="2026-03-20T00:00:00.000000000Z"    # Defaults to DT_TO (must be 4+ hours old)
+DT_DELETE_FROM="2026-01-01T00:00:00.000000000"   # Defaults to DT_FROM (interpreted in DT_TIMEZONE when no offset)
+DT_DELETE_TO="2026-03-20T00:00:00.000000000"     # Defaults to DT_TO (must be 4+ hours old)
 DT_CLEANUP=true                                # Enable deletion without --cleanup flag
 DT_DELETE_VALIDATE_RETRIES=12                  # Post-delete validation retry count
 DT_DELETE_VALIDATE_INTERVAL_SECONDS=10         # Post-delete validation retry interval
 ```
+
+#### Output Format and Timezone
+
+Two additional variables control the output file and how timestamps are interpreted:
+
+```bash
+DT_OUTPUT_FORMAT=csv             # 'csv' (default) or 'jsonl' (one JSON object per line)
+DT_TIMEZONE=America/Sao_Paulo    # IANA name; used for the output filename suffix and to
+                                 # interpret DT_FROM / DT_TO / DT_DELETE_FROM / DT_DELETE_TO
+                                 # when those values are written without a timezone offset
+```
+
+- Use `jsonl` for high-volume extractions that exceed spreadsheet row or cell limits.
+- The CLI equivalent of `DT_OUTPUT_FORMAT` is `--output-format=csv|jsonl`.
+- Timestamps with an explicit offset (e.g. `2026-03-08T00:00:00-03:00`) or with `Z` (UTC) are honored as written; `DT_TIMEZONE` is only applied when the value has no zone information.
 
 #### Deletion Safety Features
 

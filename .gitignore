@@ -14,3 +14,5 @@ tokentest.sh
 __pycache__
 .DS_Store
 IMPLEMENTATION_GUIDE.md
+*.jsonl
+EXECUTION_REPORT_*.md

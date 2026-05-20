@@ -111,7 +111,9 @@ def run_query(base_url: str, token: str, query: str, tf_start: str, tf_end: str)
         execute_url = f"{base_url}/platform/storage/query/{version}/query:execute"
         poll_url = f"{base_url}/platform/storage/query/{version}/query:poll"
 
-        resp = requests.post(execute_url, headers=headers, json=payload, stream=True, timeout=(15, 3700))
+        # (connect, read) — connect bumped to 30s to absorb transient cluster latency
+        # observed in chunk count queries.
+        resp = requests.post(execute_url, headers=headers, json=payload, stream=True, timeout=(30, 3700))
 
         if resp.status_code == 404:
             continue
@@ -131,7 +133,7 @@ def run_query(base_url: str, token: str, query: str, tf_start: str, tf_end: str)
 
         while True:
             time.sleep(2)
-            resp2 = requests.get(poll_url, headers=headers, params={"request-token": request_token}, timeout=(15, 3700))
+            resp2 = requests.get(poll_url, headers=headers, params={"request-token": request_token}, timeout=(30, 3700))
 
             if resp2.status_code == 405 and version == "v2":
                 # v2 poll might not support GET; try next version in top loop.
@@ -296,7 +298,86 @@ def download_query_result(base_url: str, token: str, request_token: str, out_pat
     return True, downloaded_bytes
 
 
-def delete_records_in_grail(base_url: str, token: str, delete_query: str, tf_start: str, tf_end: str) -> bool:
+def _maybe_decode_csv_cell(value: str):
+    """Convert a CSV cell back to its native JSON type when possible.
+
+    Cells that look like JSON objects/arrays are decoded so JSONL output keeps
+    nested structure. Anything else stays as a string — typed values (numbers,
+    booleans, nulls) cannot be safely recovered from CSV without a schema, so
+    we leave them as the API serialized them.
+    """
+    if value == "":
+        return ""
+    first = value[0]
+    if first not in ("{", "["):
+        return value
+    try:
+        return json.loads(value)
+    except (ValueError, TypeError):
+        return value
+
+
+def download_query_result_as_jsonl(base_url: str, token: str, request_token: str, out_path: str) -> tuple[bool, int]:
+    """Stream the CSV download from query:download and convert to JSONL on the fly.
+
+    Memory footprint stays constant regardless of result size because the
+    response is iterated line-by-line; we never hold the whole payload in RAM.
+    """
+    if not request_token:
+        return False, 0
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "text/csv,application/json",
+    }
+
+    download_url = f"{base_url}/platform/storage/query/v1/query:download"
+    params = {
+        "request-token": request_token,
+        "outputFormat": "CSV",
+    }
+
+    resp = requests.get(download_url, headers=headers, params=params, stream=True, timeout=(15, 3600))
+    if resp.status_code not in (200, 206):
+        raise RuntimeError(f"download status {resp.status_code}: {resp.text[:1000]}")
+
+    written_bytes = 0
+    line_iter = resp.iter_lines(decode_unicode=True)
+    reader = csv.reader(line_iter)
+
+    try:
+        headers_row = next(reader)
+    except StopIteration:
+        Path(out_path).write_text("", encoding="utf-8")
+        return True, 0
+
+    with open(out_path, "w", encoding="utf-8") as out_file:
+        for row in reader:
+            if not row:
+                continue
+            record = {}
+            for i, header in enumerate(headers_row):
+                cell = row[i] if i < len(row) else ""
+                record[header] = _maybe_decode_csv_cell(cell)
+            line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+            out_file.write(line)
+            written_bytes += len(line.encode("utf-8"))
+
+    return True, written_bytes
+
+
+def delete_records_in_grail(
+    base_url: str,
+    token: str,
+    delete_query: str,
+    tf_start: str,
+    tf_end: str,
+) -> bool:
+    """Issue a delete:execute request and poll until it finishes.
+
+    Caller is responsible for passing tf_start/tf_end already converted to UTC.
+    Input normalization (DT_TIMEZONE / explicit offsets) happens in main().
+    """
     headers = {
         "accept": "application/json",
         "Content-Type": "application/json",
@@ -507,8 +588,46 @@ def parse_iso8601(ts_str: str) -> datetime:
     # Now handle Z -> +00:00 conversion
     if ts_str.endswith("Z"):
         ts_str = ts_str[:-1] + "+00:00"
-    
+
     return datetime.fromisoformat(ts_str)
+
+
+def format_ts_for_display(ts_str_utc: str, display_tz: tzinfo) -> str:
+    """Render an internal UTC timestamp string in the user-configured zone.
+
+    Used in console output so operators see times in the same timezone they
+    configured in DT_TIMEZONE — avoids the cognitive jump from UTC to BRT.
+    """
+    try:
+        dt_utc = parse_iso8601(ts_str_utc)
+    except Exception:
+        return ts_str_utc
+    return dt_utc.astimezone(display_tz).isoformat()
+
+
+def normalize_input_dt(
+    dt: datetime,
+    fallback_tz: tzinfo,
+    fallback_tz_explicit: bool,
+    source_label: str,
+) -> datetime:
+    """Guarantee a timezone-aware datetime for inputs from --args or .env.
+
+    If the user wrote Z or an explicit offset, the timezone is honored.
+    If the value is naive, it is interpreted in `fallback_tz` — which is
+    DT_TIMEZONE when set, otherwise the system local zone. The user is warned
+    once whenever a naive input falls back to system local time, since that
+    is environment-dependent and easy to misread.
+    """
+    if dt.tzinfo is not None:
+        return dt
+    if not fallback_tz_explicit:
+        print(
+            f"Warning: {source_label} has no timezone and DT_TIMEZONE is not set; "
+            f"interpreting as system local time ({fallback_tz}). "
+            "Set DT_TIMEZONE (e.g. 'America/Sao_Paulo') or add an offset to remove ambiguity."
+        )
+    return dt.replace(tzinfo=fallback_tz)
 
 
 def calculate_24h_chunks(tf_start: str, tf_end: str) -> list[tuple[str, str]]:
@@ -1036,7 +1155,13 @@ def delete_records_in_chunks(
             )
 
             delete_started = time.monotonic()
-            deleted = delete_records_in_grail(base_url, token, delete_query, chunk_start, chunk_end)
+            deleted = delete_records_in_grail(
+                base_url,
+                token,
+                delete_query,
+                chunk_start,
+                chunk_end,
+            )
             delete_elapsed = time.monotonic() - delete_started
 
             post_check_started = time.monotonic()
@@ -1128,11 +1253,15 @@ def confirm_hard_delete_chunked(
     total_scanned_bytes: int,
     rate_usd_per_gib: Optional[float],
     cost_currency: str,
+    display_tz: tzinfo,
 ) -> bool:
     print("\nCSV export completed.")
     print(f"Local file retained: {out_path}")
     print("Hard delete will permanently remove matching records from Grail.")
-    print(f"Delete timeframe: {tf_start} -> {tf_end}")
+    print(
+        f"Delete timeframe: {format_ts_for_display(tf_start, display_tz)} "
+        f"-> {format_ts_for_display(tf_end, display_tz)}"
+    )
     print(f"Delete will proceed in {chunk_count} chunks (24 hours each) due to API limits.")
     if total_scanned_bytes > 0:
         print(f"Estimated scanned bytes for this delete workflow: {format_bytes(total_scanned_bytes)}")
@@ -1160,14 +1289,19 @@ def confirm_delete_window_mismatch(
     export_tf_end: str,
     delete_tf_start: str,
     delete_tf_end: str,
+    display_tz: tzinfo,
 ) -> bool:
+    export_start_disp = format_ts_for_display(export_tf_start, display_tz)
+    export_end_disp = format_ts_for_display(export_tf_end, display_tz)
+    delete_start_disp = format_ts_for_display(delete_tf_start, display_tz)
+    delete_end_disp = format_ts_for_display(delete_tf_end, display_tz)
     print("\n⚠️  WARNING: Deletion window extends beyond export window!")
-    print(f"   Export window: {export_tf_start} to {export_tf_end}")
-    print(f"   Delete window: {delete_tf_start} to {delete_tf_end}")
+    print(f"   Export window: {export_start_disp} to {export_end_disp}")
+    print(f"   Delete window: {delete_start_disp} to {delete_end_disp}")
     if parse_iso8601(delete_tf_start) < parse_iso8601(export_tf_start):
-        print(f"   ❌ Deleting data BEFORE export start: {delete_tf_start} < {export_tf_start}")
+        print(f"   ❌ Deleting data BEFORE export start: {delete_start_disp} < {export_start_disp}")
     if parse_iso8601(delete_tf_end) > parse_iso8601(export_tf_end):
-        print(f"   ❌ Deleting data AFTER export end: {delete_tf_end} > {export_tf_end}")
+        print(f"   ❌ Deleting data AFTER export end: {delete_end_disp} > {export_end_disp}")
     print("   You will delete records that were never downloaded to CSV!")
 
     try:
@@ -1179,26 +1313,48 @@ def confirm_delete_window_mismatch(
     return answer in ("y", "yes")
 
 
-def resolve_out_path(base_out: str, tz: tzinfo = timezone.utc) -> tuple[str, int]:
+def resolve_out_path(
+    base_out: str,
+    tz: tzinfo = timezone.utc,
+    output_format: str = "csv",
+) -> tuple[str, int]:
     """
     Derive a timestamped output path and detect how many previous runs exist.
+    The file extension is forced to match output_format ('csv' or 'jsonl'),
+    so the base_out suffix is ignored on purpose.
     e.g. grail_logs.csv -> grail_logs_20260319_160023.csv  (run #3)
+         grail_logs.csv -> grail_logs_20260319_160023.jsonl (when format=jsonl)
     """
     p = Path(base_out)
     stem = p.stem
-    suffix = p.suffix or ".csv"
+    suffix = f".{output_format}"
     parent = p.parent
 
     timestamp = datetime.now(tz).strftime("%Y%m%d_%H%M%S")
     new_name = f"{stem}_{timestamp}{suffix}"
     new_path = str(parent / new_name) if str(parent) != "." else new_name
 
-    # Count existing files matching the base stem pattern
+    # Count existing files matching the base stem pattern for the chosen format.
     pattern = f"{stem}_*{suffix}"
     existing = sorted(parent.glob(pattern)) if str(parent) != "." else sorted(Path(".").glob(pattern))
     run_number = len(existing) + 1
 
     return new_path, run_number
+
+
+def save_json_records_to_jsonl(records, out_file):
+    """
+    Write each record as a single JSON object per line (JSON Lines / NDJSON).
+    Preserves nested objects/arrays and types without flattening into CSV cells.
+    """
+    if not isinstance(records, list):
+        raise RuntimeError("expected list of records")
+
+    with open(out_file, "w", encoding="utf-8") as f:
+        for r in records:
+            line = json.dumps(r, ensure_ascii=False, separators=(",", ":"))
+            f.write(line)
+            f.write("\n")
 
 
 def save_json_records_to_csv(records, out_file):
@@ -1249,23 +1405,29 @@ def generate_execution_report(
     deleted_record_count: int = 0,
     chunks_processed: int = 0,
     duration_seconds: float = 0,
+    output_format: str = "csv",
 ) -> None:
     """Generate a timestamped execution report markdown file."""
     try:
         # Create report filename with timestamp
         report_dt = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
         report_filename = f"EXECUTION_REPORT_{report_dt}.md"
-        
-        # Get actual CSV file size from disk
-        csv_path = Path(out_path)
-        download_size = csv_path.stat().st_size if csv_path.exists() else 0
-        
-        # Count actual records in CSV (skip header)
+
+        # Get actual output file size from disk
+        output_path = Path(out_path)
+        download_size = output_path.stat().st_size if output_path.exists() else 0
+        format_label = output_format.upper()
+
+        # Count actual records: CSV has a header line to skip; JSONL is one record per line.
         actual_record_count = 0
-        if csv_path.exists():
+        if output_path.exists():
             try:
-                with open(csv_path, 'r', encoding='utf-8') as f:
-                    actual_record_count = sum(1 for _ in f) - 1  # Subtract header row
+                with open(output_path, 'r', encoding='utf-8') as f:
+                    line_count = sum(1 for _ in f)
+                if output_format == "jsonl":
+                    actual_record_count = line_count
+                else:
+                    actual_record_count = max(0, line_count - 1)
             except Exception:
                 actual_record_count = record_count
         else:
@@ -1275,17 +1437,26 @@ def generate_execution_report(
         bytes_to_gib = 1024 ** 3
         estimated_gib = estimated_bytes / bytes_to_gib if estimated_bytes else 0
         actual_gib = actual_billed_bytes / bytes_to_gib if actual_billed_bytes else 0
-        
+
         # Calculate variance if both estimates and actuals exist
         variance_pct = None
         if estimated_bytes and actual_billed_bytes:
             variance_pct = ((actual_billed_bytes - estimated_bytes) / estimated_bytes) * 100
-        
+
+        # Pre-format values so the template never tries to apply ',' to a string.
+        bytes_scanned_str = f"{estimated_bytes:,} bytes ({estimated_gib:.5f} GiB)" if estimated_bytes else "N/A"
+        bytes_deleted_value = actual_billed_bytes if actual_billed_bytes else estimated_bytes
+        bytes_deleted_str = f"{bytes_deleted_value:,} bytes ({actual_gib:.5f} GiB)" if bytes_deleted_value else "N/A"
+        rate_card_str = f"{cost_rate} {cost_currency}/GiB" if cost_rate is not None else "N/A"
+        estimated_cost_str = f"{cost_currency} {estimated_cost_usd:.8f}" if estimated_cost_usd is not None else "N/A"
+        actual_cost_str = f"{cost_currency} {actual_cost_usd:.8f}" if actual_cost_usd is not None else "N/A"
+        variance_str = f"{variance_pct:+.1f}%" if variance_pct is not None else "N/A"
+
         # Build report content
         report = f"""# Execution Report
 
-**Generated:** {datetime.now(tz=timezone.utc).isoformat()}  
-**Status:** ✅ Completed Successfully  
+**Generated:** {datetime.now(tz=timezone.utc).isoformat()}
+**Status:** ✅ Completed Successfully
 
 ---
 
@@ -1294,8 +1465,8 @@ def generate_execution_report(
 | Parameter | Value |
 | --- | --- |
 | **Mode** | {'Export + Cleanup' if cleanup_mode else 'Export Only'} |
-| **CSV File** | `{Path(out_path).name}` |
-| **CSV Size** | {download_size:,} bytes ({download_size / 1024 / 1024:.2f} MB) |
+| **{format_label} File** | `{Path(out_path).name}` |
+| **{format_label} Size** | {download_size:,} bytes ({download_size / 1024 / 1024:.2f} MB) |
 | **Records Exported** | {actual_record_count:,} |
 | **Records Deleted** | {deleted_record_count:,} |
 | **Duration** | {duration_seconds:.1f} seconds |
@@ -1321,8 +1492,8 @@ def generate_execution_report(
 | Metric | Value |
 | --- | --- |
 | **Total Records** | {actual_record_count:,} |
-| **Bytes Scanned** | {estimated_bytes or 'N/A':,} bytes ({estimated_gib:.5f} GiB) |
-| **Bytes Deleted** | {actual_billed_bytes or estimated_bytes or 'N/A':,} bytes ({actual_gib:.5f} GiB) |
+| **Bytes Scanned** | {bytes_scanned_str} |
+| **Bytes Deleted** | {bytes_deleted_str} |
 
 ---
 
@@ -1330,10 +1501,10 @@ def generate_execution_report(
 
 | Metric | Value |
 | --- | --- |
-| **Rate Card** | {cost_rate or 'N/A'} {cost_currency}/GiB |
-| **Estimated Cost** | {cost_currency} {estimated_cost_usd or 0:.8f} |
-| **Actual Cost** | {cost_currency} {actual_cost_usd or 'N/A'} |
-| **Variance** | {f'{variance_pct:+.1f}%' if variance_pct is not None else 'N/A'} |
+| **Rate Card** | {rate_card_str} |
+| **Estimated Cost** | {estimated_cost_str} |
+| **Actual Cost** | {actual_cost_str} |
+| **Variance** | {variance_str} |
 
 ---
 
@@ -1384,7 +1555,11 @@ def main():
     parser.add_argument("--delete-to", dest="delete_to_ts", default=None,
                         help="RFC3339 UTC with Z for deletion window end (fallback: DT_DELETE_TO, defaults to --to)")
     parser.add_argument("--out", default=os.getenv("DT_OUT", "grail_logs.csv"),
-                        help="CSV output path (fallback: DT_OUT)")
+                        help="Output path; extension is forced to match --output-format (fallback: DT_OUT)")
+    parser.add_argument("--output-format", dest="output_format",
+                        default=None, choices=("csv", "jsonl"),
+                        help="Output file format: 'csv' (default) or 'jsonl' (one JSON object per line). "
+                             "Fallback: DT_OUTPUT_FORMAT")
     parser.add_argument("--cleanup", action="store_true",
                         help="Prompt and hard-delete matching Grail records after CSV export (prefers DT_CLEANUP true/false)")
     parser.add_argument("--dry-run-delete", action="store_true",
@@ -1397,6 +1572,11 @@ def main():
     token = args.token or os.getenv("DT_TOKEN")
     query = args.query or os.getenv("DT_QUERY")
     delete_query = args.delete_query or os.getenv("DT_DELETE_QUERY") or query
+    output_format = (args.output_format or os.getenv("DT_OUTPUT_FORMAT") or "csv").strip().lower()
+    if output_format not in ("csv", "jsonl"):
+        raise SystemExit(
+            f"Invalid output format '{output_format}'. Use 'csv' (default) or 'jsonl'."
+        )
     rate_usd_per_gib, rate_source = load_cost_rate_per_gib(
         os.getenv("DT_LOG_QUERY_COST_RATE_PER_GIB"),
         os.getenv("DT_LOG_QUERY_COST_RATE_USD_PER_GIB"),
@@ -1432,34 +1612,45 @@ def main():
     cleanup_flag = args.cleanup or cleanup_env
     dry_run_delete_flag = args.dry_run_delete
 
+    # Counters surfaced in the final execution report.
+    deleted_record_count = 0
+    chunks_processed = 0
+
     if dry_run_delete_flag and cleanup_flag:
         print("--dry-run-delete is enabled; delete requests will not be executed.")
 
-    # Resolve timestamp timezone for CSV filename (API timeframes always stay UTC)
+    # Resolve DT_TIMEZONE: used both for the CSV filename suffix and for
+    # interpreting input timestamps that are written without an explicit zone.
     tz_name = os.getenv("DT_TIMEZONE", "").strip()
+    input_tz_explicit = False
     if tz_name:
         try:
-            file_tz = ZoneInfo(tz_name)
+            input_tz = ZoneInfo(tz_name)
+            input_tz_explicit = True
         except ZoneInfoNotFoundError:
-            print(f"Warning: unknown timezone '{tz_name}', falling back to UTC. Valid example: 'America/Sao_Paulo'")
-            file_tz = timezone.utc
+            print(
+                f"Warning: unknown DT_TIMEZONE '{tz_name}', falling back to system local time. "
+                "Valid example: 'America/Sao_Paulo'"
+            )
+            input_tz = datetime.now().astimezone().tzinfo or timezone.utc
     else:
-        file_tz = datetime.now().astimezone().tzinfo or timezone.utc  # system local time
+        input_tz = datetime.now().astimezone().tzinfo or timezone.utc
+
     base_url = normalize_environment(environment)
     dt_to_env = os.getenv("DT_TO")
     dt_from_env = os.getenv("DT_FROM")
 
     if args.to_ts:
-        to_ts = parse_iso8601(args.to_ts)
+        to_ts = normalize_input_dt(parse_iso8601(args.to_ts), input_tz, input_tz_explicit, "--to")
     elif dt_to_env:
-        to_ts = parse_iso8601(dt_to_env)
+        to_ts = normalize_input_dt(parse_iso8601(dt_to_env), input_tz, input_tz_explicit, "DT_TO")
     else:
         to_ts = datetime.now(timezone.utc)
 
     if args.from_ts:
-        from_ts = parse_iso8601(args.from_ts)
+        from_ts = normalize_input_dt(parse_iso8601(args.from_ts), input_tz, input_tz_explicit, "--from")
     elif dt_from_env:
-        from_ts = parse_iso8601(dt_from_env)
+        from_ts = normalize_input_dt(parse_iso8601(dt_from_env), input_tz, input_tz_explicit, "DT_FROM")
     else:
         from_ts = to_ts - timedelta(days=int(365 * 7 / 12))  # ~7 months
 
@@ -1474,16 +1665,24 @@ def main():
     dt_delete_to_env = os.getenv("DT_DELETE_TO")
 
     if args.delete_from_ts:
-        delete_from_ts = parse_iso8601(args.delete_from_ts)
+        delete_from_ts = normalize_input_dt(
+            parse_iso8601(args.delete_from_ts), input_tz, input_tz_explicit, "--delete-from"
+        )
     elif dt_delete_from_env:
-        delete_from_ts = parse_iso8601(dt_delete_from_env)
+        delete_from_ts = normalize_input_dt(
+            parse_iso8601(dt_delete_from_env), input_tz, input_tz_explicit, "DT_DELETE_FROM"
+        )
     else:
         delete_from_ts = from_ts  # Default to export window
 
     if args.delete_to_ts:
-        delete_to_ts = parse_iso8601(args.delete_to_ts)
+        delete_to_ts = normalize_input_dt(
+            parse_iso8601(args.delete_to_ts), input_tz, input_tz_explicit, "--delete-to"
+        )
     elif dt_delete_to_env:
-        delete_to_ts = parse_iso8601(dt_delete_to_env)
+        delete_to_ts = normalize_input_dt(
+            parse_iso8601(dt_delete_to_env), input_tz, input_tz_explicit, "DT_DELETE_TO"
+        )
     else:
         delete_to_ts = to_ts  # Default to export window
 
@@ -1516,32 +1715,49 @@ def main():
     if not preflight_ok:
         raise SystemExit("Preflight checks failed.")
 
-    print(f"Running grail query from {tf_start} to {tf_end}")
+    print(
+        f"Running grail query from {format_ts_for_display(tf_start, input_tz)} "
+        f"to {format_ts_for_display(tf_end, input_tz)}"
+    )
 
     result, request_token = run_query(base_url, token, query, tf_start, tf_end)
     records = result.get("result", {}).get("records")
 
-    out_path, run_number = resolve_out_path(args.out, file_tz)
+    out_path, run_number = resolve_out_path(args.out, input_tz, output_format)
     if run_number > 1:
         print(f"Run #{run_number} (previous run files already exist for this base name)")
+
+    format_label = output_format.upper()
 
     if records is not None:
         records_payload_bytes = estimate_records_json_size_bytes(records)
         print(
             f"Got {len(records):,} records (~{records_payload_bytes:,} bytes payload, "
-            f"{format_bytes(records_payload_bytes)}); writing CSV {out_path}"
+            f"{format_bytes(records_payload_bytes)}); writing {format_label} {out_path}"
         )
-        save_json_records_to_csv(records, out_path)
-        csv_bytes = os.path.getsize(out_path)
-        print(f"CSV written: {csv_bytes:,} bytes ({format_bytes(csv_bytes)})")
+        if output_format == "jsonl":
+            save_json_records_to_jsonl(records, out_path)
+        else:
+            save_json_records_to_csv(records, out_path)
+        written_bytes = os.path.getsize(out_path)
+        print(f"{format_label} written: {written_bytes:,} bytes ({format_bytes(written_bytes)})")
 
     elif request_token:
-        print("No in-memory records in query result; downloading from query:download endpoint")
-        downloaded, downloaded_bytes = download_query_result(base_url, token, request_token, out_path)
+        if output_format == "jsonl":
+            print(
+                "No in-memory records in query result; downloading from query:download endpoint "
+                "and converting CSV stream to JSONL"
+            )
+            downloaded, downloaded_bytes = download_query_result_as_jsonl(
+                base_url, token, request_token, out_path
+            )
+        else:
+            print("No in-memory records in query result; downloading from query:download endpoint")
+            downloaded, downloaded_bytes = download_query_result(base_url, token, request_token, out_path)
         if not downloaded:
             raise SystemExit("Download skipped: missing request token")
         print(
-            f"Downloaded CSV to {out_path} "
+            f"Downloaded {format_label} to {out_path} "
             f"({downloaded_bytes:,} bytes, {format_bytes(downloaded_bytes)})"
         )
 
@@ -1572,6 +1788,7 @@ def main():
                         tf_end,
                         delete_tf_start,
                         delete_tf_end,
+                        display_tz=input_tz,
                     )
                     if not mismatch_ok:
                         print("Remote delete canceled due to window mismatch.")
@@ -1657,6 +1874,7 @@ def main():
                     total_scanned_bytes,
                     rate_usd_per_gib,
                     cost_currency,
+                    display_tz=input_tz,
                 )
                 if not confirmed:
                     print("Remote delete canceled by user.")
@@ -1678,7 +1896,11 @@ def main():
                             precomputed_chunks=chunks,
                             precomputed_metrics=chunk_metrics,
                         )
+                        chunks_processed = sum(1 for m in chunk_metrics if m.get("deleted"))
                         if deleted:
+                            deleted_record_count = sum(
+                                max(0, m.get("records", 0)) for m in chunk_metrics if m.get("deleted")
+                            )
                             print("Remote Grail records deleted successfully.")
                             validate_records_deleted(
                                 base_url,
@@ -1740,6 +1962,9 @@ def main():
         cost_currency=cost_currency,
         cost_rate=rate_usd_per_gib if 'rate_usd_per_gib' in dir() else None,
         duration_seconds=execution_duration,
+        output_format=output_format,
+        deleted_record_count=deleted_record_count,
+        chunks_processed=chunks_processed,
     )
 
 
