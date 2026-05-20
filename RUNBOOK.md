@@ -64,7 +64,7 @@ Typical safe usage is:
 | --- | --- |
 | Python | 3.9+ (tested on 3.13) |
 | Python package | `requests` |
-| Dynatrace token scopes | `storage:logs:read` and `storage:records:delete` |
+| Dynatrace token scopes | `storage:buckets:delete`, `storage:logs:read`, and `storage:records:delete` (all three required) |
 | Working directory | Folder containing `.env` and `grail_query_to_csv.py` |
 
 ### 2.2 First-time setup
@@ -153,21 +153,27 @@ DT_QUERY=fetch logs | filter matchesValue(id, "your-filter")
 DT_DELETE_QUERY=fetch logs | filter matchesValue(id, "your-filter")
 
 # Export window
-DT_FROM=2026-03-08T00:00:00.000000000Z
-DT_TO=2026-03-09T00:00:00.000000000Z
+# Values without a timezone suffix are interpreted in DT_TIMEZONE below.
+DT_FROM=2026-03-08T00:00:00.000000000
+DT_TO=2026-03-09T00:00:00.000000000
 
 # Delete window (optional)
 # If omitted, script uses DT_FROM/DT_TO
-DT_DELETE_FROM=2026-03-01T00:00:00.000000000Z
-DT_DELETE_TO=2026-03-09T00:00:00.000000000Z
+DT_DELETE_FROM=2026-03-01T00:00:00.000000000
+DT_DELETE_TO=2026-03-09T00:00:00.000000000
 
-# Output CSV base name
+# Output base name (file extension is forced by DT_OUTPUT_FORMAT)
 DT_OUT=grail_logs.csv
+
+# Output format: csv (default) or jsonl (one JSON object per line).
+# Use jsonl for high-volume extractions that exceed spreadsheet limits.
+DT_OUTPUT_FORMAT=csv
 
 # Cleanup mode (optional)
 DT_CLEANUP=true
 
-# Timestamp timezone for output filename
+# Timezone used (a) in the output filename and (b) to interpret DT_FROM /
+# DT_TO / DT_DELETE_FROM / DT_DELETE_TO when they have no timezone suffix.
 DT_TIMEZONE=America/Sao_Paulo
 
 # Post-delete validation tuning
@@ -185,21 +191,38 @@ DT_DELETE_VALIDATE_INTERVAL_SECONDS=10
 | `DT_DELETE_QUERY` | No | Cleanup selection query |
 | `DT_FROM`, `DT_TO` | Yes | Export time window |
 | `DT_DELETE_FROM`, `DT_DELETE_TO` | No | Cleanup time window |
-| `DT_OUT` | Yes | CSV base filename |
+| `DT_OUT` | Yes | Output base filename (extension is forced by `DT_OUTPUT_FORMAT`) |
+| `DT_OUTPUT_FORMAT` | No | Output file format: `csv` (default) or `jsonl` |
 | `DT_CLEANUP` | No | Enable cleanup without `--cleanup` |
-| `DT_TIMEZONE` | No | Timezone used in output filename |
+| `DT_TIMEZONE` | No | IANA timezone used (a) in the output filename and (b) to interpret time variables that have no timezone suffix |
 | `DT_DELETE_VALIDATE_RETRIES` | No | Post-delete check attempts |
 | `DT_DELETE_VALIDATE_INTERVAL_SECONDS` | No | Delay between validation attempts |
 
 ### 4.3 Timestamp format
 
-All time values must be RFC3339 UTC with nanoseconds:
+Time values (`DT_FROM`, `DT_TO`, `DT_DELETE_FROM`, `DT_DELETE_TO`) accept three forms. The script internally converts to UTC before calling the API.
 
-```text
-YYYY-MM-DDTHH:MM:SS.000000000Z
-```
+1. **Without a timezone suffix (recommended)** — interpreted in `DT_TIMEZONE`.
 
-Example: `2026-03-08T00:00:00.000000000Z`
+   ```text
+   2026-03-08T00:00:00.000000000
+   ```
+
+   Example: with `DT_TIMEZONE=America/Sao_Paulo`, the value above means `00:00 BRT`.
+
+2. **With an explicit offset** — honored as written; `DT_TIMEZONE` is ignored for this value.
+
+   ```text
+   2026-03-08T00:00:00.000000000-03:00
+   ```
+
+3. **With `Z` suffix** — treated as UTC.
+
+   ```text
+   2026-03-08T00:00:00.000000000Z
+   ```
+
+If `DT_TIMEZONE` is not set and a value has no timezone suffix, the script falls back to the system local timezone and prints a warning. Avoid this by always setting `DT_TIMEZONE` or by writing timestamps with an explicit offset.
 
 ---
 
@@ -243,24 +266,26 @@ Use this only when intentional.
 ### 5.4 Override values from CLI
 
 ```text
---environment   Tenant URL or ID
---token         Bearer token
---query         DQL export query
---delete-query  DQL delete query (must not contain limit)
---from          Export start
---to            Export end
---delete-from   Delete start
---delete-to     Delete end
---out           CSV output path
---cleanup       Enable hard delete
+--environment    Tenant URL or ID
+--token          Bearer token
+--query          DQL export query
+--delete-query   DQL delete query (must not contain limit)
+--from           Export start
+--to             Export end
+--delete-from    Delete start
+--delete-to      Delete end
+--out            Output path (extension is forced by --output-format)
+--output-format  csv (default) or jsonl
+--cleanup        Enable hard delete
 ```
 
 Example:
 
 ```text
 ./.venv/bin/python grail_query_to_csv.py \
-  --from 2026-01-01T00:00:00.000000000Z \
-  --to   2026-01-02T00:00:00.000000000Z
+  --from 2026-01-01T00:00:00.000000000 \
+  --to   2026-01-02T00:00:00.000000000 \
+  --output-format jsonl
 ```
 
 ### 5.5 Clear stale shell overrides
@@ -303,7 +328,7 @@ After all chunks complete, script re-queries with `| limit 1` for up to `DT_DELE
 
 ## 7. Output Files and Validation
 
-Each run creates a new timestamped CSV file.
+Each run creates a new timestamped output file. The extension matches `DT_OUTPUT_FORMAT` (`.csv` by default, `.jsonl` when requested).
 
 Example sequence:
 
@@ -311,18 +336,21 @@ Example sequence:
 grail_logs.csv
 grail_logs_20260315_143012.csv
 grail_logs_20260316_090511.csv
-grail_logs_20260319_174822.csv
+grail_logs_20260319_174822.jsonl
 ```
 
 Validation checklist:
 
 1. File exists and is not empty.
-2. Row count is plausible.
+2. Row count is plausible (CSV has a header line; JSONL has one record per line, no header).
 3. Fields/columns match expected schema.
-4. Time range in CSV matches selected window.
+4. Time range in the output matches selected window.
 5. Reported payload/download size is within expected limits.
 
-Note: nested JSON objects and arrays are serialized as JSON strings in CSV cells.
+Format notes:
+
+- **CSV**: nested JSON objects and arrays are serialized as JSON strings inside cells. Suitable for spreadsheet review when record volume fits in row/cell limits.
+- **JSONL**: each line is a complete JSON record; nested structures are preserved as native objects/arrays. Streams safely at any volume — use this format when the result would exceed spreadsheet limits.
 
 ### 7.1 Package integrity validation (MANIFEST SHA256)
 
@@ -368,11 +396,11 @@ Resume command:
 
 | Message | Meaning |
 | --- | --- |
-| `Running grail query from ... to ...` | Export started |
-| `Got N records (~X bytes payload, Y); writing CSV ...` | Records returned inline with estimated payload size |
+| `Running grail query from ... to ...` | Export started (times shown in `DT_TIMEZONE`) |
+| `Got N records (~X bytes payload, Y); writing CSV ...` | Records returned inline with estimated payload size (label is `JSONL` when `DT_OUTPUT_FORMAT=jsonl`) |
 | `No in-memory records in query result; downloading from query:download endpoint` | Large result streaming download |
-| `CSV written: X bytes (Y)` | Export completed with final CSV file size |
-| `Downloaded CSV to ... (X bytes, Y)` | Streaming download completed with transferred size |
+| `CSV written: X bytes (Y)` | Export completed with final output file size (label changes for JSONL) |
+| `Downloaded CSV to ... (X bytes, Y)` | Streaming download completed with transferred size (label changes for JSONL) |
 | `WARNING: Deletion window extends beyond export window` | Delete range wider than export range |
 | `Will delete in N chunks of 24 hours each` | Cleanup plan shown |
 | `[1/3] Deleting chunk 1...` | Chunk in progress |
@@ -380,14 +408,17 @@ Resume command:
 | `No matching records found - nothing to delete.` | Nothing left to delete |
 | `Post-delete validation passed on attempt N` | No matching records found |
 | `Remote Grail data kept (not deleted).` | Cleanup mode not enabled |
+| `Warning: <var> has no timezone and DT_TIMEZONE is not set; interpreting as system local time ...` | Naive timestamp fell back to OS local time — set `DT_TIMEZONE` to remove ambiguity |
 
 ### 9.1 Full Console Examples (Counts, Bytes, and Warning)
+
+Examples below assume `DT_TIMEZONE=America/Sao_Paulo`. Timestamps in console output are shown in the configured timezone (the script still calls the API in UTC).
 
 Example A: inline records with estimated payload bytes and final CSV size.
 
 ```text
 python3 grail_query_to_csv.py --cleanup
-Running grail query from 2026-03-02T00:00:00.000000Z to 2026-03-03T00:00:00.000000Z
+Running grail query from 2026-03-02T00:00:00-03:00 to 2026-03-03T00:00:00-03:00
 Run #5 (previous run files already exist for this base name)
 Got 2,160 records (~1,555,200 bytes payload, 1.48 MB); writing CSV grail_logs_20260320_103910.csv
 CSV written: 840,506 bytes (820.81 KB)
@@ -397,15 +428,15 @@ Example B: export window is smaller than delete window (warning + confirmation).
 
 ```text
 python3 grail_query_to_csv.py --cleanup
-Running grail query from 2026-03-02T00:00:00.000000Z to 2026-03-03T00:00:00.000000Z
+Running grail query from 2026-03-02T00:00:00-03:00 to 2026-03-03T00:00:00-03:00
 Run #5 (previous run files already exist for this base name)
 Got 2,160 records (~1,555,200 bytes payload, 1.48 MB); writing CSV grail_logs_20260320_103910.csv
 CSV written: 840,506 bytes (820.81 KB)
 
 ⚠️  WARNING: Deletion window extends beyond export window!
-  Export window: 2026-03-02T00:00:00.000000Z to 2026-03-03T00:00:00.000000Z
-  Delete window: 2026-03-01T00:00:00.000000Z to 2026-03-03T00:00:00.000000Z
-  ❌ Deleting data BEFORE export start: 2026-03-01T00:00:00.000000Z < 2026-03-02T00:00:00.000000Z
+  Export window: 2026-03-02T00:00:00-03:00 to 2026-03-03T00:00:00-03:00
+  Delete window: 2026-03-01T00:00:00-03:00 to 2026-03-03T00:00:00-03:00
+  ❌ Deleting data BEFORE export start: 2026-03-01T00:00:00-03:00 < 2026-03-02T00:00:00-03:00
   You will delete records that were never downloaded to CSV!
 Proceed anyway? Type 'yes' to continue:
 ```
@@ -414,9 +445,18 @@ Example C: no inline records; streamed CSV download with transferred byte count.
 
 ```text
 python3 grail_query_to_csv.py
-Running grail query from 2026-03-01T00:00:00.000000Z to 2026-03-02T00:00:00.000000Z
+Running grail query from 2026-03-01T00:00:00-03:00 to 2026-03-02T00:00:00-03:00
 No in-memory records in query result; downloading from query:download endpoint
 Downloaded CSV to grail_logs_20260320_110001.csv (145,331,002 bytes, 138.60 MB)
+```
+
+Example D: high-volume extraction in JSONL with streaming conversion.
+
+```text
+python3 grail_query_to_csv.py --output-format jsonl
+Running grail query from 2026-03-01T00:00:00-03:00 to 2026-03-02T00:00:00-03:00
+No in-memory records in query result; downloading from query:download endpoint and converting CSV stream to JSONL
+Downloaded JSONL to grail_logs_20260320_110001.jsonl (172,055,330 bytes, 164.08 MB)
 ```
 
 ### 9.2 Decision Checklist for Warning: Deletion Window Mismatch
@@ -455,8 +495,8 @@ python3 -m pip install requests
 
 Check:
 
-1. Exact UTC time window in `DT_FROM` and `DT_TO`.
-2. Local timezone conversion differences.
+1. Time window in `DT_FROM` and `DT_TO`. If you write timestamps without a timezone suffix, confirm `DT_TIMEZONE` is set to the zone you intend (otherwise the script falls back to system local time and prints a warning).
+2. The window converted to UTC matches what you expect. The script prints the configured-timezone view at the top of each run; the API still operates on the equivalent UTC range.
 3. Stale shell overrides.
 
 Clear overrides if needed:
@@ -518,4 +558,4 @@ Delete API notes:
 1. Returns HTTP 202 and `taskId` immediately.
 2. Maximum delete window per call is 24 hours.
 3. Delete end time must be at least 4 hours in the past.
-4. Time values must use UTC and `Z` suffix.
+4. The script always converts user-provided timestamps to UTC before calling the API. Operators may write timestamps in `DT_TIMEZONE` (see section 4.3) — the conversion to UTC is performed internally.
